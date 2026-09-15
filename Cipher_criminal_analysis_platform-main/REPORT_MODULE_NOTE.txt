@@ -1,0 +1,19 @@
+CIPHER Evidence / Case Report cleanup
+
+Removed from the Evidence / Case Report screen:
+- Case Summary field/section (replaced by a bottom CASE SUMMARY button placeholder)
+- Event Chronology / timeline section
+- Spatial Record / Incident Locations section
+- Case-linked People section
+- AI Case Assessment / AI-assisted findings sections
+- Reference Trail / Source Register section
+
+Retained:
+- Case profile and editable case metadata
+- Case statistics
+- Legal & procedural record
+- Evidence register
+- Investigator notes
+- Print / Export PDF
+
+The bottom CASE SUMMARY button is wired as a placeholder action for the future Case Summary module; it does not generate a summary yet.

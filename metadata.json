@@ -1,0 +1,6 @@
+{
+  "name": "CIPHER - Criminal Intelligence & Pattern Heuristic Engine",
+  "description": "AI-powered criminal network analysis, geospatial GIS mapping, and case reconstruction intelligence platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

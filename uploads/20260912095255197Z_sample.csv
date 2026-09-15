@@ -1,0 +1,7 @@
+name,type,aliases,latitude,longitude,connected_to,relationship,evidence
+Vikram Malhotra ("Vicky"),person,Kingpin Falcon Lead,18.9800,72.8800,,,
+Farhan Merchant,person,Sub-dealer Hawala,19.0350,72.8650,Vikram Malhotra ("Vicky"),COMMUNICATES_VIA,Intercepted call logs tie Farhan to Vicky
+Navi Mumbai Vault 12,place,Secondary Locker,19.0330,73.0297,Farhan Merchant,ACCESSED_BY,Biometric keycard logs
+Black Swift MH-01-BK-4091,vehicle,Courier Van,19.0760,72.8777,Navi Mumbai Vault 12,TRANSIT_TO,Toll plaza camera capture
+Hawala Conduit Acct #4418,account,Settlement Acct,,,Farhan Merchant,TRANSFERS_TO,Ledger seized during raid
++91 98330 11223,phone,Secured Burner,,,Farhan Merchant,USES_DEVICE,Tower dump triangulation
