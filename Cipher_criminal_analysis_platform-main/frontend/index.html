@@ -489,6 +489,7 @@
                     <div class="inspector-row"><span>CONFIDENCE</span><b id="nodeInspectConf">—</b></div>
                     <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px;" id="nodeMapActionWrap">
                       <button type="button" class="gis-btn active" id="btnInspectViewOnMap" style="width:100%;font-size:11px;padding:6px 10px;text-align:center;">⌖ VIEW ON GIS MAP ↗</button>
+                      <button type="button" class="gis-btn" id="btnInspectAskCipherEntity" style="width:100%;font-size:11px;padding:6px 10px;text-align:center;border-color:var(--accent-cyan,#00f2ff);color:var(--accent-cyan,#00f2ff);background:rgba(0,242,255,0.08);">✦ ASK CIPHER ABOUT ENTITY ↗</button>
                       <button type="button" class="gis-btn" id="btnInspectDeleteEntity" style="width:100%;font-size:11px;padding:6px 10px;text-align:center;border-color:#ff5a5f;color:#ff5a5f;background:rgba(255,90,95,0.08);">− DELETE THIS ENTITY 🗑</button>
                     </div>
                   </div>
@@ -568,6 +569,9 @@
                 <div class="gis-info-section"><div class="gis-info-title"><span>LOCATION</span><small>—</small></div><div class="gis-info-row"><span>NAME</span><b>—</b></div><div class="gis-info-row"><span>TYPE</span><b>—</b></div><div class="gis-info-row"><span>COORDINATES</span><b>—</b></div></div>
                 <div class="gis-info-section"><div class="gis-info-title"><span>CASE CONTEXT</span><small>—</small></div><div class="gis-info-placeholder">Node-linked information will appear here when the GIS layer is integrated.</div></div>
                 <div class="gis-info-section"><div class="gis-info-title"><span>SOURCES</span><small>0</small></div><div class="gis-info-placeholder">CDR, evidence, vehicle, financial and other location-linked records will appear here.</div></div>
+                <div style="margin-top:10px;padding:0 12px 14px 12px;">
+                  <button type="button" class="gis-btn" id="btnInspectAskCipherLocation" style="width:100%;font-size:11px;padding:6px 10px;text-align:center;border-color:var(--accent-cyan,#00f2ff);color:var(--accent-cyan,#00f2ff);background:rgba(0,242,255,0.08);">✦ ASK CIPHER ABOUT LOCATION ↗</button>
+                </div>
               </div>
               <div class="gis-inspector-scrollbar"><span></span></div>
             </aside>
@@ -587,6 +591,7 @@
           <div class="report-toolbar">
             <div class="report-toolbar-left">
               <button type="button" class="report-action" id="reportAddEvidence">+ ADD EVIDENCE</button>
+              <button type="button" class="report-action" id="reportAiDraftBtn" style="border-color:var(--accent-cyan,#00f2ff);color:var(--accent-cyan,#00f2ff);background:rgba(0,242,255,0.06);">✦ DRAFT WITH CIPHER AI</button>
               <input type="file" id="evidenceCsvFileInput" class="csv-file-input" accept=".csv,text/csv" style="display:none;" aria-label="Upload evidence CSV file" />
             </div>
             <div class="report-toolbar-right">

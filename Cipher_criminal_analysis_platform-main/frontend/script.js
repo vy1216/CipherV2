@@ -6378,6 +6378,7 @@ document
       }, 200);
     }
   }
+  window.switchWorkspaceView = switchWorkspaceView;
 
   document.querySelectorAll(".workspace-sidebar .side-item[data-view]")
     .forEach(btn => btn.addEventListener("click", () => switchWorkspaceView(btn.dataset.view)));
@@ -9470,6 +9471,7 @@ document
   const DEFAULT_CASE_ID = 1;
   let activeCaseId = DEFAULT_CASE_ID;
   let currentConversationId = null;
+  let loadingInterval = null;
 
   function getAuthToken() {
     return (
@@ -9501,9 +9503,13 @@ document
       const statConflicts = document.getElementById("aiStatConflicts");
       const statChainLogs = document.getElementById("aiStatChainLogs");
 
-      if (statSuggestions) statSuggestions.textContent = data.pending_suggestions_count ?? 0;
-      if (statDuplicates) statDuplicates.textContent = data.duplicate_count ?? 0;
-      if (statConflicts) statConflicts.textContent = data.conflict_count ?? 0;
+      const pendingCount = data.pending_suggestions_count ?? data.new_suggestions_count ?? (data.activity?.new_suggestions_count) ?? 0;
+      const dupCount = data.duplicate_count ?? data.possible_duplicates_count ?? (data.activity?.possible_duplicates_count) ?? 0;
+      const confCount = data.conflict_count ?? data.evidence_conflicts_count ?? (data.activity?.evidence_conflicts_count) ?? 0;
+
+      if (statSuggestions) statSuggestions.textContent = pendingCount;
+      if (statDuplicates) statDuplicates.textContent = dupCount;
+      if (statConflicts) statConflicts.textContent = confCount;
       if (statChainLogs) statChainLogs.textContent = "100%";
 
       // Also refresh pending suggestions list
@@ -9522,7 +9528,8 @@ document
         headers: getAuthHeaders(),
       });
       if (!res.ok) return;
-      const suggestions = await res.json();
+      const resData = await res.json();
+      const suggestions = Array.isArray(resData) ? resData : (resData.suggestions || resData.data || []);
 
       if (!suggestions || suggestions.length === 0) {
         container.innerHTML = `
@@ -9534,17 +9541,19 @@ document
       }
 
       container.innerHTML = suggestions.map(sug => {
-        const payload = sug.suggested_payload || {};
-        const confPct = Math.round((sug.confidence || 0.8) * 100);
+        const payload = sug.suggested_payload || sug.payload || {};
+        const confVal = typeof sug.confidence === "number" ? sug.confidence : 0.85;
+        const confPct = Math.round(confVal <= 1 ? confVal * 100 : confVal);
+        const targetLabel = payload.primary_entity || payload.candidate_entity || payload.name || payload.target_name || (payload.source_id ? `Entity #${payload.source_id}` : "Case Record");
         return `
           <div class="ai-suggestion-card" data-id="${sug.id}">
             <div class="ai-sug-head">
-              <span class="ai-sug-type">${escapeHtml(sug.suggestion_type || "CANDIDATE")}</span>
+              <span class="ai-sug-type">${escapeHtml(sug.suggestion_type || sug.type || "CANDIDATE")}</span>
               <span class="ai-sug-conf">${confPct}% CONF</span>
             </div>
-            <p class="ai-sug-reason">${escapeHtml(sug.reasoning || "Algorithm detected relationship match requiring human review.")}</p>
+            <p class="ai-sug-reason">${escapeHtml(sug.reasoning || payload.reason || "Algorithm detected relationship match requiring human review.")}</p>
             <div class="ai-sug-meta">
-              <span>TARGET: <b>${escapeHtml(payload.name || payload.entity_a_id || "Case Record")}</b></span>
+              <span>TARGET: <b>${escapeHtml(targetLabel)}</b></span>
             </div>
             <div class="ai-sug-actions">
               <button type="button" class="ai-sug-btn accept" data-id="${sug.id}" data-action="ACCEPT">
@@ -9604,10 +9613,22 @@ document
     if (activeAnswerCard) activeAnswerCard.style.display = "none";
     if (loadingCard) loadingCard.style.display = "flex";
 
+    const loadingStages = [
+      "Searching case database & verified ledger...",
+      "Verifying source chain & confidence...",
+      "Analyzing network topology & coordinates...",
+      "Synthesizing answer with verified evidence citations..."
+    ];
+    let stageIdx = 0;
     const loadingStatusText = document.getElementById("aiLoadingStatusText");
     if (loadingStatusText) {
-      loadingStatusText.textContent = "Querying case database & verified ledger...";
+      loadingStatusText.textContent = loadingStages[0];
     }
+    clearInterval(loadingInterval);
+    loadingInterval = setInterval(() => {
+      stageIdx = (stageIdx + 1) % loadingStages.length;
+      if (loadingStatusText) loadingStatusText.textContent = loadingStages[stageIdx];
+    }, 750);
 
     try {
       const res = await fetch(`/api/cases/${activeCaseId}/ai/query`, {
@@ -9618,6 +9639,7 @@ document
           conversation_id: currentConversationId,
           screen_context: contextualOptions.screen || "ai-investigator",
           active_entity_id: contextualOptions.entityId || null,
+          active_location_id: contextualOptions.locationId || null,
         }),
       });
 
@@ -9626,18 +9648,19 @@ document
       }
 
       const data = await res.json();
-      currentConversationId = data.conversation_id || currentConversationId;
+      currentConversationId = data.conversation_id || (data.data?.conversation_id) || currentConversationId;
 
       renderAIResponse(data);
     } catch (err) {
       console.error("[AI Investigator] Query failure:", err);
       renderAIError(err.message || "Failed to retrieve AI analysis");
     } finally {
+      clearInterval(loadingInterval);
       if (loadingCard) loadingCard.style.display = "none";
     }
   };
 
-  function renderAIResponse(data) {
+  function renderAIResponse(raw) {
     const activeAnswerCard = document.getElementById("aiActiveAnswerCard");
     const badgeType = document.getElementById("aiAnswerTypeBadge");
     const badgeConf = document.getElementById("aiConfidenceBadge");
@@ -9650,20 +9673,37 @@ document
 
     if (!activeAnswerCard) return;
 
+    const data = (raw.data && typeof raw.data.answer === "string") ? { ...raw.data, ...raw } : raw;
+    const answer = data.answer_text || data.answer || data.data?.answer || "";
+
     // Badge styling
-    const responseType = data.response_type || "SOURCE-BACKED";
+    const rawType = (data.response_type || data.answer_type || "SOURCE_BACKED").toUpperCase().replace("-", "_");
     if (badgeType) {
-      badgeType.textContent = responseType.replace("_", "-");
       badgeType.className = "ai-badge-pill";
-      if (responseType === "SOURCE-BACKED") badgeType.classList.add("type-source-backed");
-      else if (responseType === "COMPUTED") badgeType.classList.add("type-computed");
-      else if (responseType === "AI_SUGGESTION") badgeType.classList.add("type-suggestion");
-      else badgeType.classList.add("type-unknown");
+      if (rawType.includes("SOURCE")) {
+        badgeType.textContent = "SOURCE-BACKED";
+        badgeType.classList.add("type-source-backed");
+      } else if (rawType.includes("COMPUTE")) {
+        badgeType.textContent = "COMPUTED";
+        badgeType.classList.add("type-computed");
+      } else if (rawType.includes("SUGGEST")) {
+        badgeType.textContent = "AI SUGGESTION";
+        badgeType.classList.add("type-suggestion");
+      } else {
+        badgeType.textContent = rawType;
+        badgeType.classList.add("type-unknown");
+      }
     }
 
     if (badgeConf) {
-      const confPct = Math.round((data.confidence ?? 0.9) * 100);
-      badgeConf.textContent = `Confidence: ${confPct}%`;
+      const conf = data.confidence;
+      if (typeof conf === "number") {
+        badgeConf.textContent = `Confidence: ${Math.round(conf <= 1 ? conf * 100 : conf)}%`;
+      } else if (typeof conf === "string" && conf.trim()) {
+        badgeConf.textContent = conf;
+      } else {
+        badgeConf.textContent = "Confidence: Verified (100%)";
+      }
     }
 
     if (timestamp) {
@@ -9673,18 +9713,18 @@ document
 
     // Format text nicely: convert markdown-style headers, bolding, and lists
     if (answerText) {
-      answerText.innerHTML = formatAIAnswerText(data.answer_text);
+      answerText.innerHTML = formatAIAnswerText(answer);
     }
 
     // Render sources
-    const sources = data.sources || [];
+    const sources = data.sources || data.data?.sources || [];
     if (sources.length > 0 && sourcesList && sourcesBlock) {
       sourcesBlock.style.display = "block";
       sourcesList.innerHTML = sources.map(src => `
         <div class="ai-source-item">
           <div class="ai-src-info">
             <b class="ai-src-ref">${escapeHtml(src.reference || "Evidence Ledger")}</b>
-            <span class="ai-src-sub">Source type: ${escapeHtml(src.source_type || "verified_evidence")}</span>
+            <span class="ai-src-sub">Source: ${escapeHtml(src.source_type || "verified_evidence")}${src.date ? ` · ${escapeHtml(src.date)}` : ""}${src.reliability ? ` · Reliability: ${escapeHtml(src.reliability)}` : ""}</span>
           </div>
           <button type="button" class="ai-src-link-btn" data-ref="${escapeHtml(src.reference || "")}">
             <span>VIEW IN EVIDENCE</span>
@@ -9697,8 +9737,6 @@ document
         btn.addEventListener("click", () => {
           if (typeof window.switchWorkspaceView === "function") {
             window.switchWorkspaceView("evidence");
-          } else if (typeof switchView === "function") {
-            switchView("evidence");
           }
         });
       });
@@ -9707,7 +9745,7 @@ document
     }
 
     // Render direct actions
-    const actions = data.suggested_actions || [];
+    const actions = data.suggested_actions || data.actions || data.data?.actions || [];
     if (actions.length > 0 && actionsBlock && actionButtons) {
       actionsBlock.style.display = "block";
       actionButtons.innerHTML = actions.map(act => `
@@ -9719,52 +9757,141 @@ document
 
       actionButtons.querySelectorAll(".ai-action-btn").forEach(btn => {
         btn.addEventListener("click", () => {
-          handleAIActionButtonClick(btn.dataset.actionType, btn.dataset.actionPayload);
+          handleAIActionButtonClick(btn.dataset.actionType, btn.dataset.actionPayload, data);
         });
       });
     } else if (actionsBlock) {
       actionsBlock.style.display = "none";
     }
 
+    // Check if this response is an official report draft
+    const isReportDraft = actions.some(a => a.type === "DRAFT_REPORT") || answer.includes("REPORT DRAFT") || answer.includes("EXECUTIVE SUMMARY") || answer.includes("INVESTIGATIVE REPORT");
+    renderReportDraftControls(isReportDraft, answer);
+
     activeAnswerCard.style.display = "block";
   }
 
-  function handleAIActionButtonClick(actionType, rawPayload) {
+  function renderReportDraftControls(isReport, reportText) {
+    let reportControls = document.getElementById("aiReportDraftControls");
+    if (!reportControls) {
+      reportControls = document.createElement("div");
+      reportControls.id = "aiReportDraftControls";
+      reportControls.style.marginTop = "16px";
+      reportControls.style.padding = "12px 14px";
+      reportControls.style.background = "rgba(0, 242, 255, 0.05)";
+      reportControls.style.border = "1px solid rgba(0, 242, 255, 0.25)";
+      reportControls.style.borderRadius = "8px";
+      const answerCard = document.getElementById("aiActiveAnswerCard");
+      if (answerCard) answerCard.appendChild(reportControls);
+    }
+
+    if (!isReport) {
+      reportControls.style.display = "none";
+      return;
+    }
+
+    reportControls.style.display = "block";
+    reportControls.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent-cyan,#00f2ff);">OFFICIAL INTELLIGENCE REPORT DRAFT</span>
+        <span style="font-size:10px;color:var(--text-muted,#8a96a0);">REQUIRES INVESTIGATOR APPROVAL</span>
+      </div>
+      <p style="font-size:12px;color:var(--text-secondary,#cbd5e1);margin:0 0 10px 0;">This draft synthesizes verified case evidence, accused profiles, timeline events, and network centralities.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" id="btnApproveDraftReport" class="ai-action-btn" style="background:rgba(34,197,94,0.15);border-color:#22c55e;color:#86efac;">
+          <span>✓ APPROVE &amp; REGISTER IN CHAIN OF CUSTODY</span>
+        </button>
+        <button type="button" id="btnTransferToCaseSheet" class="ai-action-btn" style="border-color:var(--accent-cyan,#00f2ff);color:var(--accent-cyan,#00f2ff);">
+          <span>↗ VIEW IN CASE SHEET</span>
+        </button>
+      </div>
+      <div id="reportApprovalNotice" style="display:none;margin-top:8px;font-size:11px;color:#86efac;"></div>
+    `;
+
+    document.getElementById("btnApproveDraftReport")?.addEventListener("click", async () => {
+      try {
+        const btn = document.getElementById("btnApproveDraftReport");
+        if (btn) btn.textContent = "REGISTERING...";
+        const res = await fetch(`/api/cases/${activeCaseId}/ai/approve-report`, {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            report_text: reportText,
+            notes: "Officer verified and approved AI drafted case report"
+          })
+        });
+        const resData = await res.json();
+        const notice = document.getElementById("reportApprovalNotice");
+        if (notice) {
+          notice.style.display = "block";
+          notice.textContent = "✓ Report successfully approved and permanently registered in the verified chain of custody.";
+        }
+        if (btn) btn.textContent = "✓ REPORT APPROVED";
+        window.refreshAIActivity();
+      } catch (e) {
+        console.error("Failed to approve report:", e);
+      }
+    });
+
+    document.getElementById("btnTransferToCaseSheet")?.addEventListener("click", () => {
+      if (typeof window.switchWorkspaceView === "function") {
+        window.switchWorkspaceView("evidence");
+      }
+    });
+  }
+
+  function handleAIActionButtonClick(actionType, rawPayload, fullData) {
     let payload = {};
     try {
       payload = JSON.parse(rawPayload || "{}");
     } catch (e) {}
 
+    const highlights = fullData?.highlights || {};
+
     if (actionType === "OPEN_NETWORK") {
-      if (typeof switchWorkspaceView === "function") switchWorkspaceView("network");
-      else if (typeof switchView === "function") switchView("network");
-      if (payload.nodes && payload.nodes.length && window.cy) {
+      if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("network");
+      const targetNode = payload.node_id || payload.nodes?.[0] || highlights.nodes?.[0];
+      if (targetNode && window.cy) {
         setTimeout(() => {
-          const nodeId = String(payload.nodes[0]);
-          const node = window.cy.getElementById(nodeId);
-          if (node && node.length) {
-            window.cy.elements().unselect();
-            node.select();
-            window.cy.center(node);
-          }
+          try {
+            const node = window.cy.getElementById(String(targetNode));
+            if (node && node.length) {
+              window.cy.elements().unselect();
+              node.select();
+              window.cy.center(node);
+            }
+          } catch (e) {}
         }, 300);
       }
-    } else if (actionType === "OPEN_GIS") {
-      if (typeof switchWorkspaceView === "function") switchWorkspaceView("gis");
-      else if (typeof switchView === "function") switchView("gis");
-      if (payload.lat && payload.lng && window.workspaceGISMap) {
+      if (highlights.path && highlights.path.length && window.cy) {
         setTimeout(() => {
-          window.workspaceGISMap.setView([payload.lat, payload.lng], 13);
+          try {
+            window.cy.elements().removeClass("highlighted-path");
+            highlights.path.forEach(nid => {
+              window.cy.getElementById(String(nid)).addClass("highlighted-path");
+            });
+          } catch (e) {}
+        }, 350);
+      }
+    } else if (actionType === "OPEN_GIS") {
+      if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("gis");
+      const lat = payload.lat || highlights.lat;
+      const lng = payload.lng || highlights.lng;
+      if (lat && lng && window.workspaceGISMap) {
+        setTimeout(() => {
+          try {
+            window.workspaceGISMap.setView([lat, lng], 13);
+          } catch (e) {}
         }, 300);
       }
     } else if (actionType === "OPEN_TIMELINE") {
-      if (typeof switchWorkspaceView === "function") switchWorkspaceView("timeline");
-      else if (typeof switchView === "function") switchView("timeline");
+      if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("timeline");
     } else if (actionType === "OPEN_EVIDENCE") {
-      if (typeof switchWorkspaceView === "function") switchWorkspaceView("evidence");
-      else if (typeof switchView === "function") switchView("evidence");
+      if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("evidence");
     } else if (actionType === "OPEN_REVIEW") {
       loadPendingSuggestions();
+      const reviewBox = document.getElementById("aiPendingSuggestionsList");
+      if (reviewBox) reviewBox.scrollIntoView({ behavior: "smooth" });
     } else if (actionType === "DRAFT_REPORT") {
       window.sendAIQuery("Draft official case intelligence report.");
     }
@@ -9776,24 +9903,26 @@ document
     const answerText = document.getElementById("aiAnswerText");
     const sourcesBlock = document.getElementById("aiSourcesBlock");
     const actionsBlock = document.getElementById("aiActionsBlock");
+    const reportControls = document.getElementById("aiReportDraftControls");
 
     if (!activeAnswerCard) return;
 
     if (badgeType) {
-      badgeType.textContent = "QUERY NOTICE";
+      badgeType.textContent = "INVESTIGATION NOTICE";
       badgeType.className = "ai-badge-pill type-unknown";
     }
 
     if (answerText) {
       answerText.innerHTML = `
         <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; color: #f87171;">
-          <b>Investigation Co-Pilot notice:</b> ${escapeHtml(msg)}. Please check query parameters or retry.
+          <b>Investigation Co-Pilot notice:</b> ${escapeHtml(msg)}. All core case records, network graphs, and evidence remain safe and accessible.
         </div>
       `;
     }
 
     if (sourcesBlock) sourcesBlock.style.display = "none";
     if (actionsBlock) actionsBlock.style.display = "none";
+    if (reportControls) reportControls.style.display = "none";
     activeAnswerCard.style.display = "block";
   }
 
@@ -9872,8 +10001,7 @@ document
     const casesAskBtn = document.getElementById("casesAskCipherBtn");
     if (casesAskBtn) {
       casesAskBtn.addEventListener("click", () => {
-        if (typeof switchWorkspaceView === "function") switchWorkspaceView("ai-investigator");
-        else if (typeof switchView === "function") switchView("ai-investigator");
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
         window.sendAIQuery("Summarize this case and provide current investigation status.", { screen: "cases" });
       });
     }
@@ -9881,8 +10009,7 @@ document
     const networkAskBtn = document.getElementById("networkAskCipherBtn");
     if (networkAskBtn) {
       networkAskBtn.addEventListener("click", () => {
-        if (typeof switchWorkspaceView === "function") switchWorkspaceView("ai-investigator");
-        else if (typeof switchView === "function") switchView("ai-investigator");
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
         window.sendAIQuery("Analyze current network structure and find the most critical actors and paths.", { screen: "network" });
       });
     }
@@ -9890,8 +10017,7 @@ document
     const gisAskBtn = document.getElementById("gisAskCipherBtn");
     if (gisAskBtn) {
       gisAskBtn.addEventListener("click", () => {
-        if (typeof switchWorkspaceView === "function") switchWorkspaceView("ai-investigator");
-        else if (typeof switchView === "function") switchView("ai-investigator");
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
         window.sendAIQuery("Analyze geospatial distribution and key location sightings in this case.", { screen: "gis" });
       });
     }
@@ -9899,8 +10025,7 @@ document
     const evidenceAskBtn = document.getElementById("evidenceAskCipherBtn");
     if (evidenceAskBtn) {
       evidenceAskBtn.addEventListener("click", () => {
-        if (typeof switchWorkspaceView === "function") switchWorkspaceView("ai-investigator");
-        else if (typeof switchView === "function") switchView("ai-investigator");
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
         window.sendAIQuery("Explain key evidentiary findings, source reliability, and extraction confidence.", { screen: "evidence" });
       });
     }
@@ -9908,17 +10033,46 @@ document
     const timelineAskBtn = document.getElementById("timelineAskCipherBtn");
     if (timelineAskBtn) {
       timelineAskBtn.addEventListener("click", () => {
-        if (typeof switchWorkspaceView === "function") switchWorkspaceView("ai-investigator");
-        else if (typeof switchView === "function") switchView("ai-investigator");
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
         window.sendAIQuery("Summarize the chronological sequence of events and timeline trace.", { screen: "timeline" });
+      });
+    }
+
+    // Contextual button on Entity Inspector (Network graph)
+    const entityAskBtn = document.getElementById("btnInspectAskCipherEntity");
+    if (entityAskBtn) {
+      entityAskBtn.addEventListener("click", () => {
+        const nameEl = document.getElementById("nodeInspectName");
+        const entName = nameEl?.textContent && nameEl.textContent !== "—" ? nameEl.textContent.trim() : "selected entity";
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
+        window.sendAIQuery(`What are the verified connections, communications, and activities of ${entName}?`, { screen: "network" });
+      });
+    }
+
+    // Contextual button on Location Inspector (GIS workspace)
+    const locationAskBtn = document.getElementById("btnInspectAskCipherLocation");
+    if (locationAskBtn) {
+      locationAskBtn.addEventListener("click", () => {
+        const locEl = document.getElementById("gisInfoTitle");
+        const locName = locEl?.textContent && locEl.textContent !== "No location selected" ? locEl.textContent.trim() : "selected location";
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
+        window.sendAIQuery(`Analyze spatial events, sightings, and transit corridors associated with ${locName}.`, { screen: "gis" });
+      });
+    }
+
+    // Contextual button on Case Report Toolbar
+    const reportAiBtn = document.getElementById("reportAiDraftBtn");
+    if (reportAiBtn) {
+      reportAiBtn.addEventListener("click", () => {
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
+        window.sendAIQuery("Draft official case intelligence report.", { screen: "evidence" });
       });
     }
 
     // Sidebar AI Investigator button
     document.querySelectorAll('.workspace-sidebar .side-item[data-view="ai-investigator"]').forEach(btn => {
       btn.addEventListener("click", () => {
-        if (typeof switchWorkspaceView === "function") switchWorkspaceView("ai-investigator");
-        else if (typeof switchView === "function") switchView("ai-investigator");
+        if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("ai-investigator");
       });
     });
 

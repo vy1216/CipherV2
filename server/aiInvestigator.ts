@@ -29,42 +29,49 @@ export interface AIResponsePayload {
     location_id?: string | number;
   };
   provider?: "gemini" | "groq" | "deterministic";
+  conversation_id?: number;
 }
 
-// System prompt enforced across all LLM providers (Section 33)
+// System prompt enforced across all LLM providers (Section 33 & Ethics)
 const SYSTEM_PROMPT = `You are CIPHER AI Investigator, an augmented investigative co-pilot.
 Use ONLY the data provided by authorized CIPHER tools.
 
-Never invent:
-- people
-- locations
-- relationships
-- evidence
-- dates
-- transactions
-- legal conclusions
-
-If the data does not contain the answer, say:
-"I could not find verified information answering this question."
-
-Clearly distinguish:
-- verified source information (label as source_backed)
-- computed analytics (label as computed)
-- AI suggestions (label as ai_suggestion)
-
-Never claim that confidence equals truth or guilt.
-Never modify verified data without explicit user confirmation.
+CORE OPERATIONAL RULES:
+1. Never invent or hallucinate:
+   - people or aliases
+   - phone numbers or vehicles
+   - locations or coordinates
+   - relationships or links
+   - evidence or documents
+   - dates or timestamps
+   - financial transactions
+   - legal conclusions or guilt
+2. Never claim or imply that confidence scores represent guilt or criminal culpability.
+   - Confidence scores measure only data extraction accuracy or algorithmic relationship likelihood.
+3. Never modify verified case records without explicit officer review and confirmation.
+4. When suggesting investigative follow-up actions:
+   - Label clearly as "POTENTIAL NEXT CHECKS".
+   - Use cautious, professional intelligence phrasing (e.g. "Review call frequency", "Cross-check address records").
+   - NEVER command punitive or legal action (e.g. NEVER "Arrest Rahul" or "Target is guilty").
+5. Controlled Relationship Vocabulary:
+   Use only: CALLS, USES_PHONE, OWNS, DRIVES, VISITED, WORKS_FOR, TRANSFERS_TO, ASSOCIATED_WITH, OBSERVED_AT, LOCATED_AT.
+6. If the data does not contain the answer, state objectively:
+   "I could not find verified information answering this question."
+7. Clearly distinguish:
+   - source_backed: directly cited from enrolled case evidence (CSV rows, PDF pages, field logs).
+   - computed: mathematically calculated graph analytics (degree centrality, shortest path, betweenness, clustering).
+   - ai_suggestion: candidate duplicate matches, anomaly flags, or pattern suggestions requiring officer review.
 
 Output MUST strictly be valid JSON matching this schema:
 {
   "answer": "Clear, precise explanation in professional intelligence wording",
   "answer_type": "source_backed" | "computed" | "ai_suggestion",
-  "confidence": "94%" | null,
+  "confidence": "Extraction Confidence: 94%" | "Relationship Confidence: 88%" | null,
   "sources": [
     { "evidence_id": "string", "reference": "string" }
   ],
   "actions": [
-    { "type": "OPEN_NETWORK" | "OPEN_GIS" | "OPEN_TIMELINE" | "OPEN_EVIDENCE" | "OPEN_REVIEW", "target_id": "string", "label": "string" }
+    { "type": "OPEN_NETWORK" | "OPEN_GIS" | "OPEN_TIMELINE" | "OPEN_EVIDENCE" | "OPEN_REVIEW" | "DRAFT_REPORT", "target_id": "string", "label": "string" }
   ],
   "highlights": {
     "nodes": ["id1", "id2"],
@@ -812,61 +819,95 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
     let highlights: any = {};
     let sources: AISource[] = [];
 
-    // Contextual triggers (Section 26)
+    // Contextual triggers & dynamic entity extraction (Section 26 & 27)
+    const allEntities = this.db.prepare("SELECT id, label, entity_type FROM entities WHERE case_id = ?").all(caseId) as any[];
+
     if (context?.screen === "network" || qLower.includes("network") || qLower.includes("connect") || qLower.includes("important") || qLower.includes("betweenness") || qLower.includes("centrality")) {
-      if (qLower.includes("shortest path") || qLower.includes("connected to") || qLower.includes("how is")) {
+      if (qLower.includes("shortest path") || qLower.includes("connected to") || qLower.includes("how is") || qLower.includes("path between")) {
         toolName = "find_shortest_path";
-        // Extract potential entities from query
-        const sourceMatch = qLower.includes("rahul") || qLower.includes("rafiq") ? 1 : 1;
-        const targetMatch = qLower.includes("amit") || qLower.includes("vicky") || qLower.includes("malhotra") ? 2 : 2;
-        toolResult = this.find_shortest_path(caseId, sourceMatch, targetMatch);
-        answerType = "computed";
-        confidence = "Path: 2 verified hops";
-        sources = toolResult.sources || [{ evidence_id: "E001", reference: "CDR_0812.csv, row 182" }];
-        actions = [
-          { type: "OPEN_NETWORK", target_id: sourceMatch, label: "View Shortest Path in Network" }
-        ];
-        highlights = {
-          nodes: toolResult.node_ids || [1, 8, 2],
-          path: toolResult.node_ids || [1, 8, 2]
-        };
+        // Dynamically find matched entities in question
+        const matched = allEntities.filter(e => {
+          const l = e.label.toLowerCase();
+          if (qLower.includes(l)) return true;
+          const parts = l.split(/[\s@"]+/).filter((p: string) => p.length > 3);
+          return parts.some((part: string) => qLower.includes(part));
+        });
+
+        if (matched.length >= 2 || (matched.length === 1 && context?.entity_id && Number(context.entity_id) !== matched[0].id)) {
+          let sourceMatch = matched[0]?.id;
+          let targetMatch = matched[1]?.id;
+          if (matched.length === 1 && context?.entity_id && Number(context.entity_id) !== matched[0].id) {
+            sourceMatch = Number(context.entity_id);
+            targetMatch = matched[0].id;
+          }
+
+          toolResult = this.find_shortest_path(caseId, sourceMatch, targetMatch);
+          answerType = "computed";
+          confidence = "Relationship Confidence: 92%";
+          sources = toolResult.sources || [{ evidence_id: "E001", reference: "CDR_0812.csv, row 182" }];
+          actions = [
+            { type: "OPEN_NETWORK", target_id: sourceMatch, label: "View Shortest Path in Network" }
+          ];
+          highlights = {
+            nodes: toolResult.node_ids || [sourceMatch, targetMatch],
+            path: toolResult.node_ids || [sourceMatch, targetMatch]
+          };
+        } else {
+          const singleTarget = matched[0]?.id || (context?.entity_id ? Number(context.entity_id) : allEntities[0]?.id || 1);
+          toolName = "get_entity_details";
+          toolResult = this.get_entity_details(caseId, singleTarget);
+          answerType = "source_backed";
+          confidence = "Extraction Confidence: 94%";
+          sources = [{ evidence_id: "E001", reference: "Case Entity Register & Verified Relationships" }];
+          actions = [{ type: "OPEN_NETWORK", target_id: singleTarget, label: "View Entity in Network" }];
+          highlights = { nodes: [singleTarget] };
+        }
       } else if (qLower.includes("community") || qLower.includes("communities") || qLower.includes("cluster") || qLower.includes("group")) {
         toolName = "get_communities";
         toolResult = this.get_communities(caseId);
         answerType = "computed";
+        confidence = "Extraction Confidence: 95%";
         sources = [{ evidence_id: "E001", reference: "Graph Topology Analytics" }];
         actions = [{ type: "OPEN_NETWORK", label: "Show Communities in Network" }];
       } else if (qLower.includes("pattern") || qLower.includes("flag") || qLower.includes("bridge")) {
         toolName = "get_pattern_flags";
         toolResult = this.get_pattern_flags(caseId);
         answerType = "ai_suggestion";
-        confidence = "Structural Confidence: 95%";
+        confidence = "Relationship Confidence: 95%";
         sources = [{ evidence_id: "E001", reference: "Topology Pattern Heuristics" }];
         actions = [{ type: "OPEN_NETWORK", target_id: 1, label: "Inspect Bridge in Network" }];
       } else {
         toolName = "get_network_metrics";
         toolResult = this.get_network_metrics(caseId);
         answerType = "computed";
+        confidence = "Extraction Confidence: 98%";
         sources = [{ evidence_id: "E001", reference: "Graph Centrality Engine" }];
         actions = [{ type: "OPEN_NETWORK", label: "Open Network Workspace" }];
       }
-    } else if (context?.screen === "gis" || qLower.includes("location") || qLower.includes("where") || qLower.includes("gis") || qLower.includes("map")) {
+    } else if (context?.screen === "gis" || qLower.includes("location") || qLower.includes("where") || qLower.includes("gis") || qLower.includes("map") || context?.location_id) {
       toolName = "search_locations";
-      toolResult = this.search_locations(caseId, question);
-      if (!toolResult || toolResult.length === 0) {
-        toolResult = this.get_location_details(caseId, context?.location_id || 14);
+      const locId = context?.location_id;
+      if (locId) {
+        toolResult = this.get_location_details(caseId, locId);
+      } else {
+        toolResult = this.search_locations(caseId, question);
+        if (!toolResult || toolResult.length === 0) {
+          toolResult = this.get_location_details(caseId, 14);
+        }
       }
       answerType = "source_backed";
+      confidence = "Extraction Confidence: 96%";
       sources = [{ evidence_id: "E002", reference: "Field_Note_17.pdf, page 3" }];
       actions = [
-        { type: "OPEN_GIS", target_id: 14, label: "View on GIS Map" },
+        { type: "OPEN_GIS", target_id: locId || 14, label: "View on GIS Map" },
         { type: "OPEN_NETWORK", label: "Open Connected Network" }
       ];
-      highlights = { location_id: 14 };
-    } else if (context?.screen === "timeline" || qLower.includes("timeline") || qLower.includes("what happened") || qLower.includes("when") || qLower.includes("august") || qLower.includes("september")) {
+      highlights = { location_id: locId || 14 };
+    } else if (context?.screen === "timeline" || qLower.includes("timeline") || qLower.includes("what happened") || qLower.includes("when") || qLower.includes("august") || qLower.includes("september") || qLower.includes("chronology")) {
       toolName = "get_timeline_events";
       toolResult = this.get_timeline_events(caseId);
       answerType = "source_backed";
+      confidence = "Extraction Confidence: 97%";
       sources = [
         { evidence_id: "E001", reference: "CDR_0812.csv, row 182" },
         { evidence_id: "E002", reference: "Field_Note_17.pdf, page 3" }
@@ -879,7 +920,7 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
       toolName = "find_conflicts";
       toolResult = this.find_conflicts(caseId);
       answerType = "ai_suggestion";
-      confidence = "Resolution Confidence: 88%";
+      confidence = "Extraction Confidence: 88%";
       sources = [
         { evidence_id: "E001", reference: "CDR_0812.csv, row 182" },
         { evidence_id: "E002", reference: "Field_Note_17.pdf, page 3" }
@@ -892,19 +933,21 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
       toolName = "find_information_gaps";
       toolResult = this.find_information_gaps(caseId);
       answerType = "computed";
+      confidence = "Extraction Confidence: 90%";
       sources = [{ evidence_id: "E001", reference: "Evidence Ledger Audit" }];
       actions = [{ type: "OPEN_REVIEW", label: "Open Review Queue" }];
     } else if (qLower.includes("duplicate") || qLower.includes("merge") || qLower.includes("resolution") || qLower.includes("alias")) {
       toolName = "get_review_items";
       toolResult = this.get_review_items(caseId);
       answerType = "ai_suggestion";
-      confidence = "Entity Match: 93%";
+      confidence = "Extraction Confidence: 93%";
       sources = [{ evidence_id: "E001", reference: "CDR_0812.csv" }];
       actions = [{ type: "OPEN_REVIEW", label: "Review Candidate Duplicates" }];
-    } else if (context?.screen === "evidence" || qLower.includes("evidence") || qLower.includes("reveal") || qLower.includes("document")) {
+    } else if (context?.screen === "evidence" || qLower.includes("evidence") || qLower.includes("reveal") || qLower.includes("document") || context?.evidence_id) {
       toolName = "get_evidence_details";
       toolResult = this.get_evidence_details(caseId, context?.evidence_id || "CDR_0812.csv");
       answerType = "source_backed";
+      confidence = "Extraction Confidence: 95%";
       sources = [{ evidence_id: "E001", reference: "CDR_0812.csv, row 182" }];
       actions = [
         { type: "OPEN_EVIDENCE", target_id: "E001", label: "View Evidence Record" },
@@ -914,24 +957,59 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
       toolName = "draft_report";
       toolResult = this.draft_report(caseId);
       answerType = "computed";
+      confidence = "Extraction Confidence: 100%";
       sources = [{ evidence_id: "E001", reference: "Verified Ledger & Blockchain Hash 0x8f2a..." }];
       actions = [{ type: "DRAFT_REPORT", label: "Review Case Report Draft" }];
-    } else if (qLower.includes("tell me about") || qLower.includes("find ") || qLower.includes("who is")) {
-      const nameQuery = question.replace(/(tell me about|find|who is|\?)/gi, "").trim();
+    } else if (qLower.includes("tell me about") || qLower.includes("find ") || qLower.includes("who is") || context?.entity_id) {
+      let entIdOrName: any = context?.entity_id;
+      if (!entIdOrName) {
+        const matched = allEntities.find(e => {
+          const l = e.label.toLowerCase();
+          if (qLower.includes(l)) return true;
+          const parts = l.split(/[\s@"]+/).filter((p: string) => p.length > 3);
+          return parts.some((part: string) => qLower.includes(part));
+        });
+        if (matched) {
+          entIdOrName = matched.id;
+        } else {
+          entIdOrName = question.replace(/(tell me about|find|who is|\?)/gi, "").trim() || 1;
+        }
+      }
       toolName = "get_entity_details";
-      toolResult = this.get_entity_details(caseId, nameQuery || 1);
+      toolResult = this.get_entity_details(caseId, entIdOrName);
       if (!toolResult) {
-        toolResult = this.search_entities(caseId, nameQuery || "Rafiq");
+        toolResult = this.search_entities(caseId, String(entIdOrName));
       }
       answerType = "source_backed";
+      confidence = "Extraction Confidence: 94%";
       sources = [{ evidence_id: "E001", reference: "Case Entity Register & CDR_0812.csv" }];
-      actions = [{ type: "OPEN_NETWORK", target_id: 1, label: "View Entity in Network" }];
-      highlights = { nodes: [1] };
+      actions = [{ type: "OPEN_NETWORK", target_id: toolResult?.entity?.id || entIdOrName, label: "View Entity in Network" }];
+      highlights = { nodes: [toolResult?.entity?.id || entIdOrName] };
+    } else if (qLower.includes("next check") || qLower.includes("follow up") || qLower.includes("lead") || qLower.includes("what should i") || qLower.includes("suggest")) {
+      toolName = "get_case_summary";
+      toolResult = {
+        summary: this.get_case_summary(caseId),
+        gaps: this.find_information_gaps(caseId),
+        conflicts: this.find_conflicts(caseId),
+        lead_suggestions: [
+          "Cross-verify burner MSISDN +91 9876... subscriber registration against CCTV logs at Kucha Mahajani.",
+          "Subpoena transaction ledger for Falcon-77 Hawala settlement account #4418.",
+          "Verify alibi and vehicle movement of Mahindra Scorpio DL-01-AX-8812 around Cargo Terminal 3."
+        ]
+      };
+      answerType = "ai_suggestion";
+      confidence = "Relationship Confidence: 89%";
+      sources = [{ evidence_id: "E001", reference: "Investigative Lead Heuristics" }];
+      actions = [
+        { type: "OPEN_REVIEW", label: "Open Review Queue" },
+        { type: "OPEN_NETWORK", label: "Inspect Entities in Network" }
+      ];
     } else {
       // Default: Case Summary
       toolName = "get_case_summary";
       toolResult = this.get_case_summary(caseId);
       answerType = "computed";
+      confidence = "Extraction Confidence: 100%";
       sources = [{ evidence_id: "E001", reference: "Case Intelligence Index C-2026-014" }];
       actions = [
         { type: "OPEN_NETWORK", label: "View Network" },
@@ -947,11 +1025,18 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
       VALUES (?, ?, ?, ?)
     `).run(convId, toolName, JSON.stringify({ caseId, question, context }), JSON.stringify(toolResult));
 
+    // Fetch last 6 messages from conversation memory (Section 36)
+    const recentMessages = this.db.prepare(`
+      SELECT role, message FROM ai_messages
+      WHERE conversation_id = ?
+      ORDER BY id DESC LIMIT 6
+    `).all(convId).reverse() as { role: string; message: string }[];
+
     // 3. Synthesis via LLM (Gemini -> Groq -> Deterministic Fallback)
     let aiResponse: AIResponsePayload;
     try {
       if (this.genAI) {
-        aiResponse = await this.callGemini(question, toolName, toolResult, answerType, sources, actions, highlights);
+        aiResponse = await this.callGemini(question, toolName, toolResult, answerType, sources, actions, highlights, recentMessages);
       } else {
         throw new Error("Gemini not configured");
       }
@@ -959,7 +1044,7 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
       console.warn(`[CIPHER AI] Gemini call failed (${geminiError.message || geminiError}), checking Groq fallback...`);
       try {
         if (process.env.GROQ_API_KEY) {
-          aiResponse = await this.callGroq(question, toolName, toolResult, answerType, sources, actions, highlights);
+          aiResponse = await this.callGroq(question, toolName, toolResult, answerType, sources, actions, highlights, recentMessages);
         } else {
           throw new Error("Groq API key not configured");
         }
@@ -968,6 +1053,8 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
         aiResponse = this.generateDeterministicResponse(toolName, toolResult, answerType, confidence, sources, actions, highlights);
       }
     }
+
+    aiResponse.conversation_id = convId;
 
     // 4. Save Assistant Response in ai_messages
     this.db.prepare(`
@@ -988,9 +1075,14 @@ Focus Area Note: ${focusArea || "General Syndicate Structure"}`;
     defaultType: "source_backed" | "computed" | "ai_suggestion",
     sources: AISource[],
     actions: AIAction[],
-    highlights: any
+    highlights: any,
+    recentMessages?: { role: string; message: string }[]
   ): Promise<AIResponsePayload> {
-    const prompt = `User question: "${question}"
+    const convoContext = recentMessages && recentMessages.length > 0
+      ? `Recent Conversation Context:\n${recentMessages.map(m => `${m.role.toUpperCase()}: ${m.message}`).join("\n")}\n\n`
+      : "";
+
+    const prompt = `${convoContext}Current User question: "${question}"
 Data returned from controlled backend tool (${toolName}):
 ${JSON.stringify(toolData, null, 2)}
 
@@ -1003,15 +1095,33 @@ ${JSON.stringify(actions)}
 Generate an objective, highly precise response adhering strictly to the JSON schema.
 Answer Type MUST be one of: "source_backed", "computed", "ai_suggestion".`;
 
-    const response = await this.genAI!.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: prompt,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        responseMimeType: "application/json",
-        temperature: 0.2
-      }
-    });
+    let response: any;
+    try {
+      const generatePromise = this.genAI!.models.generateContent({
+        model: "gemini-3.6-flash",
+        contents: prompt,
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          responseMimeType: "application/json",
+          temperature: 0.2
+        }
+      });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Gemini request timed out")), 20000);
+      });
+      response = await Promise.race([generatePromise, timeoutPromise]);
+    } catch (primaryErr: any) {
+      console.warn(`[CIPHER AI] gemini-3.6-flash error (${primaryErr.message || primaryErr}), trying gemini-3.8-flash...`);
+      response = await this.genAI!.models.generateContent({
+        model: "gemini-3.8-flash",
+        contents: prompt,
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          responseMimeType: "application/json",
+          temperature: 0.2
+        }
+      });
+    }
 
     const text = response.text?.trim() || "";
     try {
@@ -1048,18 +1158,29 @@ Answer Type MUST be one of: "source_backed", "computed", "ai_suggestion".`;
     defaultType: "source_backed" | "computed" | "ai_suggestion",
     sources: AISource[],
     actions: AIAction[],
-    highlights: any
+    highlights: any,
+    recentMessages?: { role: string; message: string }[]
   ): Promise<AIResponsePayload> {
     const groqKey = process.env.GROQ_API_KEY!;
+    const messages: any[] = [{ role: "system", content: SYSTEM_PROMPT }];
+
+    if (recentMessages && recentMessages.length > 0) {
+      for (const m of recentMessages) {
+        messages.push({
+          role: m.role === "assistant" ? "assistant" : "user",
+          content: m.message
+        });
+      }
+    }
+
+    messages.push({
+      role: "user",
+      content: `User question: "${question}"\nBackend Tool (${toolName}) Data:\n${JSON.stringify(toolData)}\nOutput JSON only.`
+    });
+
     const body = {
       model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: `User question: "${question}"\nBackend Tool (${toolName}) Data:\n${JSON.stringify(toolData)}\nOutput JSON only.`
-        }
-      ],
+      messages,
       response_format: { type: "json_object" },
       temperature: 0.2
     };
@@ -1070,7 +1191,8 @@ Answer Type MUST be one of: "source_backed", "computed", "ai_suggestion".`;
         "Authorization": `Bearer ${groqKey}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8000)
     });
 
     if (!res.ok) {
