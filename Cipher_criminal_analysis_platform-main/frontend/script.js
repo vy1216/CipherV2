@@ -6367,6 +6367,15 @@ document
       }
     }
 
+    const reviewView = document.getElementById("reviewView");
+    reviewView?.classList.toggle("active-view", view === "review");
+    if (view === "review" && reviewView) {
+      reviewView.scrollTop = 0;
+      if (typeof window.loadReviewWorkspace === "function") {
+        window.loadReviewWorkspace();
+      }
+    }
+
     /* When switching to GIS, init the map if not already done and reload latest data */
     if (view === "gis") {
       gisView.scrollTop = 0;
@@ -9889,9 +9898,13 @@ document
     } else if (actionType === "OPEN_EVIDENCE") {
       if (typeof window.switchWorkspaceView === "function") window.switchWorkspaceView("evidence");
     } else if (actionType === "OPEN_REVIEW") {
-      loadPendingSuggestions();
-      const reviewBox = document.getElementById("aiPendingSuggestionsList");
-      if (reviewBox) reviewBox.scrollIntoView({ behavior: "smooth" });
+      if (typeof window.switchWorkspaceView === "function") {
+        window.switchWorkspaceView("review");
+      } else {
+        loadPendingSuggestions();
+        const reviewBox = document.getElementById("aiPendingSuggestionsList");
+        if (reviewBox) reviewBox.scrollIntoView({ behavior: "smooth" });
+      }
     } else if (actionType === "DRAFT_REPORT") {
       window.sendAIQuery("Draft official case intelligence report.");
     }
@@ -9983,7 +9996,11 @@ document
 
     if (openReviewBtn) {
       openReviewBtn.addEventListener("click", () => {
-        loadPendingSuggestions();
+        if (typeof window.switchWorkspaceView === "function") {
+          window.switchWorkspaceView("review");
+        } else {
+          loadPendingSuggestions();
+        }
       });
     }
 
@@ -10084,5 +10101,1125 @@ document
     document.addEventListener("DOMContentLoaded", bindAIEvents);
   } else {
     bindAIEvents();
+  }
+})();
+
+/* =============================================================================
+   CIPHER REVIEW SECTION & ADJUDICATION SUBSYSTEM (SPEC v1.0)
+   Human-in-the-loop verification, diff inspector, bulk review, and audit trail
+   ============================================================================= */
+(function initReviewSubsystem() {
+  const DEFAULT_CASE_ID = 1;
+  let activeCaseId = DEFAULT_CASE_ID;
+  let reviewItems = [];
+  let activeItem = null;
+  let selectedItemIds = new Set();
+  let currentTypeFilter = "ALL";
+  let currentStatusFilter = "PENDING";
+  let currentSourceFilter = "ALL";
+  let currentSearchQuery = "";
+  let pendingRejectItemId = null;
+
+  function getAuthToken() {
+    return (
+      localStorage.getItem("cipher_access_token") ||
+      localStorage.getItem("token") ||
+      sessionStorage.getItem("cipher_access_token") ||
+      ""
+    );
+  }
+
+  function getAuthHeaders() {
+    const headers = { "Content-Type": "application/json" };
+    const token = getAuthToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return headers;
+  }
+
+  function showToast(msg) {
+    let t = document.getElementById("reviewToast");
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "reviewToast";
+      t.className = "network-toast";
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => {
+      t.classList.remove("show");
+    }, 3200);
+  }
+
+  function getConfidenceTier(conf) {
+    const num = typeof conf === "number" ? conf : parseFloat(conf) || 0;
+    if (num >= 0.9 || num >= 90) return { label: `${Math.round(num > 1 ? num : num * 100)}% HIGH`, tier: "high", color: "green" };
+    if (num >= 0.7 || num >= 70) return { label: `${Math.round(num > 1 ? num : num * 100)}% MED`, tier: "medium", color: "yellow" };
+    return { label: `${Math.round(num > 1 ? num : num * 100)}% LOW`, tier: "low", color: "red" };
+  }
+
+  function formatFindingTitle(item) {
+    const type = (item.type || "").toLowerCase();
+    const ai = item.ai_output || {};
+
+    if (type === "entity") {
+      return `${ai.name || item.entity_id || "Entity"} (${ai.entity_type || ai.type || "Person"})`;
+    } else if (type === "relationship") {
+      return `${ai.source_name || "Entity"} —[${ai.relationship_type || "RELATED_TO"}]→ ${ai.target_name || "Entity"}`;
+    } else if (type === "location") {
+      return `${ai.name || item.location_name || "Location"} — ${ai.address || "Geocoded Coordinate"}`;
+    } else if (type === "duplicate") {
+      return `Merge Candidate: ${ai.primary_name || "Primary"} ↔ ${ai.duplicate_name || "Candidate"}`;
+    } else if (type === "event") {
+      return `Event: ${ai.event_type || ai.title || "Observation"} (${ai.timestamp || "Dated"})`;
+    }
+    return `Finding #${item.id}`;
+  }
+
+  // Load Review Workspace
+  window.loadReviewWorkspace = async function() {
+    try {
+      const kickerEl = document.getElementById("reviewCaseKicker");
+      if (kickerEl) kickerEl.textContent = `CASE / C-2026-0${activeCaseId}`;
+
+      let url = `/cases/${activeCaseId}/review?status=${encodeURIComponent(currentStatusFilter)}`;
+      if (currentTypeFilter !== "ALL") {
+        url += `&type=${encodeURIComponent(currentTypeFilter)}`;
+      }
+      if (currentSearchQuery.trim()) {
+        url += `&search=${encodeURIComponent(currentSearchQuery.trim())}`;
+      }
+
+      const res = await fetch(url, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error("Failed to load review queue");
+      const data = await res.json();
+
+      reviewItems = data.items || [];
+      const summary = data.summary || {};
+
+      // 1. Update Metrics
+      updateMetrics(summary);
+
+      // 2. Update Category Tab Counts
+      updateTabCounts(summary);
+
+      // 3. Update Sources dropdown
+      populateSourceDropdown();
+
+      // 4. Render Cards List
+      renderReviewCards();
+
+      // 5. Update Inspector
+      if (reviewItems.length > 0) {
+        // If current activeItem is still in list, keep it; else select first
+        const exists = activeItem && reviewItems.find(i => i.id === activeItem.id);
+        if (exists) {
+          selectReviewItem(exists.id);
+        } else {
+          selectReviewItem(reviewItems[0].id);
+        }
+      } else {
+        closeInspector();
+      }
+
+      // 6. Update Sidebar Badge
+      updateSidebarBadge(summary.pending ?? 0);
+
+    } catch (err) {
+      console.error("[Review Subsystem] Error loading review workspace:", err);
+    }
+  };
+
+  function updateMetrics(summary) {
+    const pendingEl = document.getElementById("reviewStatPending");
+    const verifiedEl = document.getElementById("reviewStatVerified");
+    const rejectedEl = document.getElementById("reviewStatRejected");
+    const editedEl = document.getElementById("reviewStatEdited");
+
+    if (pendingEl) pendingEl.textContent = summary.pending ?? 0;
+    if (verifiedEl) verifiedEl.textContent = summary.accepted ?? 0;
+    if (rejectedEl) rejectedEl.textContent = summary.rejected ?? 0;
+    if (editedEl) editedEl.textContent = summary.edited ?? 0;
+  }
+
+  function updateTabCounts(summary) {
+    const counts = summary.by_type || {};
+    const countAll = document.getElementById("tabCountAll");
+    const countEnt = document.getElementById("tabCountEntity");
+    const countRel = document.getElementById("tabCountRelationship");
+    const countLoc = document.getElementById("tabCountLocation");
+    const countDup = document.getElementById("tabCountDuplicate");
+    const countEvt = document.getElementById("tabCountEvent");
+    const countLow = document.getElementById("tabCountLowConf");
+
+    if (countAll) countAll.textContent = summary.pending ?? reviewItems.length;
+    if (countEnt) countEnt.textContent = counts.entity ?? 0;
+    if (countRel) countRel.textContent = counts.relationship ?? 0;
+    if (countLoc) countLoc.textContent = counts.location ?? 0;
+    if (countDup) countDup.textContent = counts.duplicate ?? 0;
+    if (countEvt) countEvt.textContent = counts.event ?? 0;
+    if (countLow) countLow.textContent = summary.low_confidence ?? 0;
+  }
+
+  function updateSidebarBadge(pendingCount) {
+    const badge = document.getElementById("reviewNavBadge");
+    if (badge) {
+      badge.textContent = pendingCount;
+      badge.style.display = pendingCount > 0 ? "inline-block" : "none";
+    }
+  }
+  window.refreshReviewBadge = async function() {
+    try {
+      const res = await fetch(`/cases/${activeCaseId}/review?status=PENDING`, { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const pendingCount = data.summary?.pending ?? data.total ?? 0;
+        updateSidebarBadge(pendingCount);
+      }
+    } catch (e) {}
+  };
+
+  function populateSourceDropdown() {
+    const select = document.getElementById("reviewSourceSelect");
+    if (!select) return;
+
+    const currentVal = select.value;
+    const sources = new Set();
+    reviewItems.forEach(item => {
+      const src = item.source_reference?.document_name || item.evidence_name;
+      if (src) sources.add(src);
+    });
+
+    let html = `<option value="ALL">All Evidence Documents</option>`;
+    sources.forEach(src => {
+      html += `<option value="${escapeHtml(src)}">${escapeHtml(src)}</option>`;
+    });
+    select.innerHTML = html;
+    if (sources.has(currentVal)) {
+      select.value = currentVal;
+    }
+  }
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  // Render Review Cards in Queue Column
+  function renderReviewCards() {
+    const listEl = document.getElementById("reviewItemsList");
+    const emptyEl = document.getElementById("reviewEmptyState");
+    const titleEl = document.getElementById("reviewQueueListTitle");
+
+    if (!listEl) return;
+
+    let filtered = reviewItems;
+    if (currentSourceFilter !== "ALL") {
+      filtered = filtered.filter(i => (i.source_reference?.document_name || i.evidence_name) === currentSourceFilter);
+    }
+
+    if (titleEl) {
+      titleEl.textContent = `${currentStatusFilter} FINDINGS QUEUE (${filtered.length})`;
+    }
+
+    if (filtered.length === 0) {
+      listEl.innerHTML = "";
+      if (emptyEl) emptyEl.style.display = "flex";
+      return;
+    }
+
+    if (emptyEl) emptyEl.style.display = "none";
+
+    let html = "";
+    filtered.forEach(item => {
+      const type = (item.type || "entity").toLowerCase();
+      const conf = getConfidenceTier(item.confidence);
+      const isSelected = activeItem && activeItem.id === item.id;
+      const isChecked = selectedItemIds.has(item.id);
+      const title = formatFindingTitle(item);
+      const srcName = item.source_reference?.document_name || item.evidence_name || "Investigation Document";
+      const srcRef = item.source_reference?.page_or_row || (item.source_reference?.page ? `Page ${item.source_reference.page}` : "Reference Verified");
+      const quote = item.extracted_context?.quote || item.extracted_context?.snippet || "Evidence excerpt captured during analytical extraction.";
+      const statusClass = (item.status || "PENDING").toLowerCase();
+
+      html += `
+        <div class="review-card-item ${isSelected ? "selected" : ""}" data-id="${item.id}" id="reviewCard_${item.id}">
+          <div class="review-card-top">
+            <div class="card-top-left">
+              <input type="checkbox" class="review-item-checkbox" data-id="${item.id}" ${isChecked ? "checked" : ""} />
+              <span class="finding-type-badge badge-${type}">${type}</span>
+            </div>
+            <div class="card-confidence-meter">
+              <span class="conf-pill ${conf.tier}">${conf.label}</span>
+            </div>
+          </div>
+
+          <h4 class="review-card-title">${escapeHtml(title)}</h4>
+
+          <blockquote class="review-card-quote">
+            "${escapeHtml(quote)}"
+          </blockquote>
+
+          <div class="review-card-meta">
+            <div class="card-source-tag">
+              <span>📄</span>
+              <b>${escapeHtml(srcName)}</b>
+              <span>•</span>
+              <span>${escapeHtml(srcRef)}</span>
+            </div>
+            <span class="card-status-pill ${statusClass}">${item.status || "PENDING"}</span>
+          </div>
+
+          <div class="review-card-actions">
+            ${item.status === "PENDING" ? `
+              <button type="button" class="btn-card-action btn-card-accept" data-action="accept" data-id="${item.id}">✓ ACCEPT</button>
+              <button type="button" class="btn-card-action btn-card-edit" data-action="edit" data-id="${item.id}">✎ EDIT</button>
+              <button type="button" class="btn-card-action btn-card-reject" data-action="reject" data-id="${item.id}">✕ REJECT</button>
+            ` : ""}
+            <button type="button" class="btn-card-action btn-card-inspect" data-action="inspect" data-id="${item.id}">INSPECT DETAILS →</button>
+          </div>
+        </div>
+      `;
+    });
+
+    listEl.innerHTML = html;
+
+    // Attach click handlers to cards and buttons
+    listEl.querySelectorAll(".review-card-item").forEach(card => {
+      const id = parseInt(card.dataset.id, 10);
+      card.addEventListener("click", (e) => {
+        if (e.target.closest("button") || e.target.closest("input[type='checkbox']")) return;
+        selectReviewItem(id);
+      });
+    });
+
+    listEl.querySelectorAll(".review-item-checkbox").forEach(chk => {
+      chk.addEventListener("change", (e) => {
+        const id = parseInt(chk.dataset.id, 10);
+        if (chk.checked) {
+          selectedItemIds.add(id);
+        } else {
+          selectedItemIds.delete(id);
+        }
+        updateBulkToolbar();
+      });
+    });
+
+    listEl.querySelectorAll("button[data-action]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        const id = parseInt(btn.dataset.id, 10);
+        if (action === "accept") {
+          handleAcceptItem(id);
+        } else if (action === "edit") {
+          selectReviewItem(id);
+          const firstInput = document.querySelector("#inspEditForm input");
+          if (firstInput) firstInput.focus();
+        } else if (action === "reject") {
+          openRejectModal(id);
+        } else if (action === "inspect") {
+          selectReviewItem(id);
+        }
+      });
+    });
+  }
+
+  function updateBulkToolbar() {
+    const countEl = document.getElementById("reviewSelectedCount");
+    const bulkAcceptBtn = document.getElementById("reviewBulkAcceptBtn");
+    const selectAllChk = document.getElementById("reviewSelectAll");
+
+    const count = selectedItemIds.size;
+    if (countEl) countEl.textContent = count;
+    if (bulkAcceptBtn) bulkAcceptBtn.disabled = count === 0;
+    if (selectAllChk) {
+      const visibleCheckboxes = document.querySelectorAll(".review-item-checkbox");
+      selectAllChk.checked = visibleCheckboxes.length > 0 && count === visibleCheckboxes.length;
+    }
+  }
+
+  // Select Item and Render into Inspector Panel
+  async function selectReviewItem(id) {
+    const item = reviewItems.find(i => i.id === id);
+    if (!item) return;
+
+    activeItem = item;
+
+    // Highlight card in list
+    document.querySelectorAll(".review-card-item").forEach(c => {
+      c.classList.toggle("selected", parseInt(c.dataset.id, 10) === id);
+    });
+
+    // Show Inspector Panel
+    const emptyEl = document.getElementById("reviewInspectorEmpty");
+    const panelEl = document.getElementById("reviewInspectorPanel");
+    if (emptyEl) emptyEl.style.display = "none";
+    if (panelEl) panelEl.style.display = "flex";
+
+    // Render inspector contents
+    renderInspector(item);
+  }
+
+  function closeInspector() {
+    activeItem = null;
+    const emptyEl = document.getElementById("reviewInspectorEmpty");
+    const panelEl = document.getElementById("reviewInspectorPanel");
+    if (emptyEl) emptyEl.style.display = "flex";
+    if (panelEl) panelEl.style.display = "none";
+    document.querySelectorAll(".review-card-item").forEach(c => c.classList.remove("selected"));
+  }
+
+  async function renderInspector(item) {
+    const type = (item.type || "entity").toLowerCase();
+    const conf = getConfidenceTier(item.confidence);
+    const title = formatFindingTitle(item);
+
+    // Header badges & title
+    const typeBadge = document.getElementById("inspFindingTypeBadge");
+    const confBadge = document.getElementById("inspConfidenceBadge");
+    const statusBadge = document.getElementById("inspStatusBadge");
+    const titleEl = document.getElementById("inspFindingTitle");
+
+    if (typeBadge) {
+      typeBadge.className = `finding-type-badge badge-${type}`;
+      typeBadge.textContent = type;
+    }
+    if (confBadge) {
+      confBadge.className = `finding-conf-badge conf-pill ${conf.tier}`;
+      confBadge.textContent = conf.label;
+    }
+    if (statusBadge) {
+      statusBadge.className = `card-status-pill ${(item.status || "PENDING").toLowerCase()}`;
+      statusBadge.textContent = item.status || "PENDING";
+    }
+    if (titleEl) titleEl.textContent = title;
+
+    // Provenance / Citation
+    const docName = document.getElementById("inspDocName");
+    const docRef = document.getElementById("inspDocRef");
+    const quoteEl = document.getElementById("inspEvidenceSnippet");
+
+    const srcName = item.source_reference?.document_name || item.evidence_name || "Investigation Document";
+    const srcRef = item.source_reference?.page_or_row || (item.source_reference?.page ? `Page ${item.source_reference.page}` : "Reference Verified");
+    const quote = item.extracted_context?.quote || item.extracted_context?.snippet || "Evidence excerpt captured during extraction.";
+
+    if (docName) docName.textContent = srcName;
+    if (docRef) docRef.textContent = srcRef;
+    if (quoteEl) quoteEl.textContent = `"${quote}"`;
+
+    // AI Reasoning
+    const aiReason = document.getElementById("inspAiReason");
+    const confBarFill = document.getElementById("inspConfBarFill");
+    const confScoreText = document.getElementById("inspConfScoreText");
+
+    const rawConf = typeof item.confidence === "number" ? item.confidence : parseFloat(item.confidence) || 0.8;
+    const pct = Math.round(rawConf > 1 ? rawConf : rawConf * 100);
+
+    if (aiReason) aiReason.textContent = item.reason || "High-confidence finding extracted by neural NER and structured association models.";
+    if (confBarFill) {
+      confBarFill.className = `conf-bar-fill ${conf.color}`;
+      confBarFill.style.width = `${pct}%`;
+    }
+    if (confScoreText) confScoreText.textContent = `${(pct / 100).toFixed(2)} (${conf.tier.toUpperCase()})`;
+
+    // Comparison with Existing Case Graph
+    renderGraphComparison(item);
+
+    // Dynamic Edit Form
+    renderEditForm(item);
+
+    // Adjudication Buttons state
+    const acceptBtn = document.getElementById("inspAcceptBtn");
+    const editBtn = document.getElementById("inspEditBtn");
+    const rejectBtn = document.getElementById("inspRejectBtn");
+
+    const isPending = (item.status || "PENDING") === "PENDING";
+    if (acceptBtn) acceptBtn.disabled = !isPending;
+    if (editBtn) editBtn.disabled = !isPending;
+    if (rejectBtn) rejectBtn.disabled = !isPending;
+
+    // Previous Item Audit History if exists
+    const auditSec = document.getElementById("inspAuditHistorySection");
+    const auditList = document.getElementById("inspItemAuditList");
+    if (item.reviewed_by) {
+      if (auditSec) auditSec.style.display = "flex";
+      if (auditList) {
+        auditList.innerHTML = `
+          <div class="comparison-match-item">
+            <div>
+              <b>Reviewed by:</b> ${escapeHtml(item.reviewed_by)}<br>
+              <span style="font-size:11px;color:#7b8e81;">${escapeHtml(item.reviewed_at || "Recent")}</span>
+            </div>
+            <div>
+              <span class="card-status-pill ${(item.status || "").toLowerCase()}">${item.status}</span>
+            </div>
+          </div>
+          ${item.review_note ? `<p style="font-size:12px;color:#a4b7aa;margin:6px 0 0;">Note: ${escapeHtml(item.review_note)}</p>` : ""}
+        `;
+      }
+    } else {
+      if (auditSec) auditSec.style.display = "none";
+    }
+  }
+
+  // Graph Knowledge Comparison
+  async function renderGraphComparison(item) {
+    const compBox = document.getElementById("inspComparisonBox");
+    if (!compBox) return;
+
+    const type = (item.type || "").toLowerCase();
+    const ai = item.ai_output || {};
+
+    if (type === "entity") {
+      const name = ai.name || "";
+      compBox.innerHTML = `
+        <p class="comparison-novelty-note">Checking existing case knowledge for <b>"${escapeHtml(name)}"</b>...</p>
+      `;
+
+      try {
+        const res = await fetch(`/cases/${activeCaseId}/entities`, { headers: getAuthHeaders() });
+        if (res.ok) {
+          const entities = await res.json();
+          const matches = entities.filter(e => 
+            e.name?.toLowerCase().includes(name.toLowerCase()) ||
+            name.toLowerCase().includes(e.name?.toLowerCase())
+          );
+
+          if (matches.length > 0) {
+            let matchHtml = `<p class="comparison-novelty-note" style="color:#fbbf24;">⚠ Similar existing entity found in case ledger:</p>`;
+            matches.forEach(m => {
+              matchHtml += `
+                <div class="comparison-match-item">
+                  <div>
+                    <b style="color:#38bdf8;">${escapeHtml(m.name)}</b> (${escapeHtml(m.entity_type || m.type)})
+                    <div style="font-size:10px;color:#6b7f72;">ID: ${m.id} • Verified in ledger</div>
+                  </div>
+                  <button type="button" class="btn-card-action" style="background:#25342a;color:#d9ff55;" id="btnCompareLinkNode_${m.id}">
+                    CONFIRM RESOLUTION
+                  </button>
+                </div>
+              `;
+            });
+            compBox.innerHTML = matchHtml;
+          } else {
+            compBox.innerHTML = `
+              <p class="comparison-novelty-note" style="color:#34d399;">
+                ✓ Novel Entity: No duplicate record matching "${escapeHtml(name)}" exists in this case ledger. Committing this finding will establish a new verified node.
+              </p>
+            `;
+          }
+        }
+      } catch (e) {
+        compBox.innerHTML = `<p class="comparison-novelty-note">Novel entity candidate. Ready for graph promotion.</p>`;
+      }
+    } else if (type === "relationship") {
+      const s = ai.source_name || "Source";
+      const r = ai.relationship_type || "RELATED_TO";
+      const t = ai.target_name || "Target";
+      compBox.innerHTML = `
+        <div class="comparison-novelty-note">
+          <b>Graph Linkage Preview:</b>
+          <div style="margin-top:8px;padding:8px 12px;background:#090d0a;border-radius:4px;font-family:'DM Mono',monospace;color:#facc15;">
+            (${escapeHtml(s)}) — [${escapeHtml(r)}] → (${escapeHtml(t)})
+          </div>
+          <p style="margin:8px 0 0;font-size:11px;color:#7b8e81;">
+            Directional verification ensures accurate centrality and shortest-path computation in network topology.
+          </p>
+        </div>
+      `;
+    } else if (type === "location") {
+      const lat = ai.latitude || item.latitude || "—";
+      const lng = ai.longitude || item.longitude || "—";
+      compBox.innerHTML = `
+        <div class="comparison-novelty-note">
+          <b>GIS Spatial Layer Check:</b>
+          <div style="display:flex;gap:16px;margin-top:6px;font-family:'DM Mono',monospace;font-size:12px;color:#34d399;">
+            <span>LAT: ${escapeHtml(String(lat))}</span>
+            <span>LNG: ${escapeHtml(String(lng))}</span>
+          </div>
+          <p style="margin:8px 0 0;font-size:11px;color:#7b8e81;">
+            Approving this finding plots coordinates onto the workspace GIS map layer with verified intelligence marker.
+          </p>
+        </div>
+      `;
+    } else if (type === "duplicate") {
+      const p = ai.primary_name || "Primary Entity";
+      const d = ai.duplicate_name || "Candidate Entity";
+      compBox.innerHTML = `
+        <div class="comparison-novelty-note">
+          <table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:6px;">
+            <thead>
+              <tr style="color:#7b8e81;border-bottom:1px solid #202b23;">
+                <th style="text-align:left;padding:4px;">CANONICAL MASTER</th>
+                <th style="text-align:left;padding:4px;">MERGE CANDIDATE</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:6px;color:#38bdf8;font-weight:700;">${escapeHtml(p)}</td>
+                <td style="padding:6px;color:#c084fc;font-weight:700;">${escapeHtml(d)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p style="margin:8px 0 0;font-size:11px;color:#a855f7;">
+            Resolution transfers all associated communications and links from candidate into canonical entity.
+          </p>
+        </div>
+      `;
+    } else {
+      compBox.innerHTML = `
+        <p class="comparison-novelty-note">Ready for investigator adjudication.</p>
+      `;
+    }
+  }
+
+  // Dynamic Attribute Edit Form
+  function renderEditForm(item) {
+    const formEl = document.getElementById("inspEditForm");
+    if (!formEl) return;
+
+    const type = (item.type || "").toLowerCase();
+    const ai = item.ai_output || {};
+
+    if (type === "entity") {
+      const name = ai.name || "";
+      const entType = ai.entity_type || ai.type || "Person";
+      const aliases = Array.isArray(ai.aliases) ? ai.aliases.join(", ") : (ai.aliases || "");
+      const role = ai.role || ai.notes || "";
+
+      formEl.innerHTML = `
+        <div class="form-row">
+          <label for="editFormEntityName">Entity Full Name / Canonical Identifier:</label>
+          <input type="text" id="editFormEntityName" class="form-input" value="${escapeHtml(name)}" />
+        </div>
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label for="editFormEntityType">Entity Category:</label>
+            <select id="editFormEntityType" class="review-select" style="width:100%;">
+              <option value="Person" ${entType === "Person" ? "selected" : ""}>Person</option>
+              <option value="Organization" ${entType === "Organization" ? "selected" : ""}>Organization</option>
+              <option value="Phone" ${entType === "Phone" ? "selected" : ""}>Phone</option>
+              <option value="Vehicle" ${entType === "Vehicle" ? "selected" : ""}>Vehicle</option>
+              <option value="Location" ${entType === "Location" ? "selected" : ""}>Facility / Location</option>
+              <option value="Weapon" ${entType === "Weapon" ? "selected" : ""}>Weapon / Explosive</option>
+              <option value="Cyber" ${entType === "Cyber" ? "selected" : ""}>Cyber / Domain</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label for="editFormEntityAliases">Known Aliases (Comma-separated):</label>
+            <input type="text" id="editFormEntityAliases" class="form-input" value="${escapeHtml(aliases)}" placeholder="e.g. Rahul, Chhota Bhai" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="editFormEntityRole">Case Role / Key Intelligence Summary:</label>
+          <input type="text" id="editFormEntityRole" class="form-input" value="${escapeHtml(role)}" placeholder="e.g. Hawala money courier / Logistics coordinator" />
+        </div>
+      `;
+    } else if (type === "relationship") {
+      const src = ai.source_name || "";
+      const relType = ai.relationship_type || "CALLS";
+      const tgt = ai.target_name || "";
+      const quote = ai.evidence_quote || item.extracted_context?.quote || "";
+
+      const relOptions = [
+        "CALLS",
+        "ASSOCIATED_WITH",
+        "TRANSFERS_TO",
+        "COMMUNICATES_WITH",
+        "TRAVELS_WITH",
+        "MEETS_WITH",
+        "OPERATES_UNDER",
+        "LOCATED_AT",
+        "OWNS",
+        "DRIVES",
+        "WORKS_FOR"
+      ];
+
+      let optionsHtml = relOptions.map(opt => `
+        <option value="${opt}" ${relType === opt ? "selected" : ""}>${opt}</option>
+      `).join("");
+
+      formEl.innerHTML = `
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label for="editFormRelSource">Source Entity:</label>
+            <input type="text" id="editFormRelSource" class="form-input" value="${escapeHtml(src)}" />
+          </div>
+          <div class="form-row">
+            <label for="editFormRelTarget">Target Entity:</label>
+            <input type="text" id="editFormRelTarget" class="form-input" value="${escapeHtml(tgt)}" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="editFormRelType">Controlled Relationship Type:</label>
+          <select id="editFormRelType" class="review-select" style="width:100%;">
+            ${optionsHtml}
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="editFormRelQuote">Evidentiary Citation Quote:</label>
+          <input type="text" id="editFormRelQuote" class="form-input" value="${escapeHtml(quote)}" />
+        </div>
+      `;
+    } else if (type === "location") {
+      const name = ai.name || item.location_name || "";
+      const address = ai.address || "";
+      const lat = ai.latitude || "";
+      const lng = ai.longitude || "";
+
+      formEl.innerHTML = `
+        <div class="form-row">
+          <label for="editFormLocName">Location Name / Landmark:</label>
+          <input type="text" id="editFormLocName" class="form-input" value="${escapeHtml(name)}" />
+        </div>
+        <div class="form-row">
+          <label for="editFormLocAddress">Address / Neighborhood:</label>
+          <input type="text" id="editFormLocAddress" class="form-input" value="${escapeHtml(address)}" />
+        </div>
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label for="editFormLocLat">Latitude:</label>
+            <input type="number" step="any" id="editFormLocLat" class="form-input" value="${escapeHtml(String(lat))}" />
+          </div>
+          <div class="form-row">
+            <label for="editFormLocLng">Longitude:</label>
+            <input type="number" step="any" id="editFormLocLng" class="form-input" value="${escapeHtml(String(lng))}" />
+          </div>
+        </div>
+      `;
+    } else if (type === "duplicate") {
+      const p = ai.primary_name || "";
+      const d = ai.duplicate_name || "";
+      formEl.innerHTML = `
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label for="editFormDupPrimary">Retained Master Entity:</label>
+            <input type="text" id="editFormDupPrimary" class="form-input" value="${escapeHtml(p)}" />
+          </div>
+          <div class="form-row">
+            <label for="editFormDupSecondary">Merged Candidate Entity:</label>
+            <input type="text" id="editFormDupSecondary" class="form-input" value="${escapeHtml(d)}" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="editFormDupAliases">Add Candidate As Alias To Master:</label>
+          <input type="text" id="editFormDupAliases" class="form-input" value="${escapeHtml(d)}" />
+        </div>
+      `;
+    } else {
+      const rawJson = JSON.stringify(ai, null, 2);
+      formEl.innerHTML = `
+        <div class="form-row">
+          <label for="editFormRawJson">Structured Attributes (JSON):</label>
+          <textarea id="editFormRawJson" class="review-textarea" rows="4">${escapeHtml(rawJson)}</textarea>
+        </div>
+      `;
+    }
+  }
+
+  // Get Form Values on Edit
+  function collectEditedData(item) {
+    const type = (item.type || "").toLowerCase();
+    const base = { ...(item.ai_output || {}) };
+
+    if (type === "entity") {
+      const name = document.getElementById("editFormEntityName")?.value?.trim();
+      const entType = document.getElementById("editFormEntityType")?.value;
+      const aliasesStr = document.getElementById("editFormEntityAliases")?.value?.trim();
+      const role = document.getElementById("editFormEntityRole")?.value?.trim();
+
+      if (name) base.name = name;
+      if (entType) base.entity_type = entType;
+      if (aliasesStr) {
+        base.aliases = aliasesStr.split(",").map(s => s.trim()).filter(Boolean);
+      }
+      if (role) base.role = role;
+    } else if (type === "relationship") {
+      const src = document.getElementById("editFormRelSource")?.value?.trim();
+      const tgt = document.getElementById("editFormRelTarget")?.value?.trim();
+      const relType = document.getElementById("editFormRelType")?.value;
+      const quote = document.getElementById("editFormRelQuote")?.value?.trim();
+
+      if (src) base.source_name = src;
+      if (tgt) base.target_name = tgt;
+      if (relType) base.relationship_type = relType;
+      if (quote) base.evidence_quote = quote;
+    } else if (type === "location") {
+      const name = document.getElementById("editFormLocName")?.value?.trim();
+      const addr = document.getElementById("editFormLocAddress")?.value?.trim();
+      const lat = parseFloat(document.getElementById("editFormLocLat")?.value);
+      const lng = parseFloat(document.getElementById("editFormLocLng")?.value);
+
+      if (name) base.name = name;
+      if (addr) base.address = addr;
+      if (!isNaN(lat)) base.latitude = lat;
+      if (!isNaN(lng)) base.longitude = lng;
+    } else if (type === "duplicate") {
+      const p = document.getElementById("editFormDupPrimary")?.value?.trim();
+      const d = document.getElementById("editFormDupSecondary")?.value?.trim();
+      if (p) base.primary_name = p;
+      if (d) base.duplicate_name = d;
+    } else {
+      const rawText = document.getElementById("editFormRawJson")?.value?.trim();
+      if (rawText) {
+        try {
+          return JSON.parse(rawText);
+        } catch (e) {}
+      }
+    }
+    return base;
+  }
+
+  // Adjudication Handlers
+  async function handleAcceptItem(id) {
+    try {
+      const res = await fetch(`/review/${id}/accept`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          reviewer: "Investigator Officer",
+          review_note: "Verified from source evidence and committed to graph"
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to accept item");
+      }
+
+      showToast("✓ Finding accepted and permanently committed to case graph!");
+      window.loadReviewWorkspace();
+
+      // Trigger background syncs
+      if (typeof window.loadWorkspaceGISData === "function") window.loadWorkspaceGISData();
+      if (typeof window.refreshAIActivity === "function") window.refreshAIActivity();
+
+    } catch (err) {
+      console.error("[Review Subsystem] Accept error:", err);
+      showToast(`Error accepting finding: ${err.message}`);
+    }
+  }
+
+  async function handleEditItem(id) {
+    const item = reviewItems.find(i => i.id === id);
+    if (!item) return;
+
+    const editedData = collectEditedData(item);
+
+    try {
+      const res = await fetch(`/review/${id}/edit`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          edited_data: editedData,
+          reviewer: "Investigator Officer",
+          review_note: "Investigator modified finding attributes before committing"
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to edit item");
+      }
+
+      showToast("✎ Finding edits saved & committed to case graph!");
+      window.loadReviewWorkspace();
+
+      // Trigger background syncs
+      if (typeof window.loadWorkspaceGISData === "function") window.loadWorkspaceGISData();
+      if (typeof window.refreshAIActivity === "function") window.refreshAIActivity();
+
+    } catch (err) {
+      console.error("[Review Subsystem] Edit error:", err);
+      showToast(`Error editing finding: ${err.message}`);
+    }
+  }
+
+  function openRejectModal(id) {
+    pendingRejectItemId = id;
+    const item = reviewItems.find(i => i.id === id);
+    const titleEl = document.getElementById("rejectModalItemTitle");
+    if (titleEl) titleEl.textContent = item ? formatFindingTitle(item) : `#${id}`;
+
+    const modal = document.getElementById("reviewRejectModal");
+    if (modal) modal.style.display = "flex";
+  }
+
+  function closeRejectModal() {
+    pendingRejectItemId = null;
+    const modal = document.getElementById("reviewRejectModal");
+    if (modal) modal.style.display = "none";
+  }
+
+  async function confirmRejectItem() {
+    if (!pendingRejectItemId) return;
+    const id = pendingRejectItemId;
+    const reasonSelect = document.getElementById("rejectReasonSelect");
+    const notesInput = document.getElementById("rejectNotesInput");
+
+    const reason = reasonSelect?.value || "Incorrect finding";
+    const notes = notesInput?.value?.trim() || "";
+
+    try {
+      const res = await fetch(`/review/${id}/reject`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          reason: reason,
+          review_note: notes,
+          reviewer: "Investigator Officer"
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to reject item");
+      }
+
+      closeRejectModal();
+      showToast("✕ Finding rejected from case ledger with audit record.");
+      window.loadReviewWorkspace();
+
+      if (typeof window.refreshAIActivity === "function") window.refreshAIActivity();
+
+    } catch (err) {
+      console.error("[Review Subsystem] Reject error:", err);
+      showToast(`Error rejecting finding: ${err.message}`);
+    }
+  }
+
+  async function handleBulkAccept() {
+    const ids = Array.from(selectedReviewItemIds);
+    if (ids.length === 0) return;
+
+    try {
+      const res = await fetch(`/review/bulk-accept`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          review_ids: ids,
+          reviewer: "Investigator Officer"
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Bulk accept failed");
+      }
+
+      const result = await res.json();
+      selectedItemIds.clear();
+      showToast(`✓ Bulk verification complete! ${result.accepted_count || ids.length} findings promoted.`);
+      window.loadReviewWorkspace();
+
+      if (typeof window.loadWorkspaceGISData === "function") window.loadWorkspaceGISData();
+      if (typeof window.refreshAIActivity === "function") window.refreshAIActivity();
+
+    } catch (err) {
+      console.error("[Review Subsystem] Bulk accept error:", err);
+      showToast(`Error during bulk accept: ${err.message}`);
+    }
+  }
+
+  // Audit Log Modal
+  async function openAuditModal() {
+    const modal = document.getElementById("reviewAuditModal");
+    const tbody = document.getElementById("reviewAuditTableBody");
+
+    if (modal) modal.style.display = "flex";
+    if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:#7b8e81;">Loading immutable audit trail...</td></tr>`;
+
+    try {
+      const res = await fetch(`/cases/${activeCaseId}/review/history`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error("Failed to load audit history");
+      const data = await res.json();
+      const actions = data.history || data.actions || [];
+
+      if (actions.length === 0) {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:#7b8e81;">No adjudication actions logged for this case yet.</td></tr>`;
+        return;
+      }
+
+      let rows = "";
+      actions.forEach(a => {
+        const time = a.action_timestamp ? new Date(a.action_timestamp).toLocaleString() : "Recent";
+        const actionType = a.action_type || "ACTION";
+        const findingTitle = a.item_type ? `${a.item_type.toUpperCase()} #${a.review_item_id}` : `#${a.review_item_id}`;
+        const reviewer = a.reviewed_by || a.officer_id || "Investigator Officer";
+        const reason = a.reason || a.review_note || (a.diff ? "Attribute modifications saved" : "Verified from source evidence");
+
+        rows += `
+          <tr>
+            <td style="font-family:'DM Mono',monospace;font-size:11px;color:#8da193;">${escapeHtml(time)}</td>
+            <td><span class="audit-action-chip ${actionType}">${escapeHtml(actionType)}</span></td>
+            <td><b>${escapeHtml(findingTitle)}</b></td>
+            <td><span class="finding-type-badge badge-${(a.item_type || "entity").toLowerCase()}">${escapeHtml(a.item_type || "Finding")}</span></td>
+            <td>${escapeHtml(reviewer)}</td>
+            <td style="font-size:11px;color:#a4b7aa;">${escapeHtml(reason)}</td>
+          </tr>
+        `;
+      });
+
+      if (tbody) tbody.innerHTML = rows;
+
+    } catch (err) {
+      console.error("[Review Subsystem] Audit error:", err);
+      if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:#ef4444;">Error loading audit history: ${err.message}</td></tr>`;
+    }
+  }
+
+  function closeAuditModal() {
+    const modal = document.getElementById("reviewAuditModal");
+    if (modal) modal.style.display = "none";
+  }
+
+  // Bind UI Events
+  function bindReviewEvents() {
+    // 1. Category Tabs
+    document.querySelectorAll(".review-tab-btn").forEach(tab => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".review-tab-btn").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        currentTypeFilter = tab.dataset.type || "ALL";
+        window.loadReviewWorkspace();
+      });
+    });
+
+    // 2. Status Dropdown
+    const statusSelect = document.getElementById("reviewStatusSelect");
+    if (statusSelect) {
+      statusSelect.addEventListener("change", () => {
+        currentStatusFilter = statusSelect.value;
+        window.loadReviewWorkspace();
+      });
+    }
+
+    // 3. Source Dropdown
+    const sourceSelect = document.getElementById("reviewSourceSelect");
+    if (sourceSelect) {
+      sourceSelect.addEventListener("change", () => {
+        currentSourceFilter = sourceSelect.value;
+        renderReviewCards();
+      });
+    }
+
+    // 4. Search Input (Debounced)
+    const searchInput = document.getElementById("reviewSearchInput");
+    if (searchInput) {
+      let searchTimer = null;
+      searchInput.addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          currentSearchQuery = searchInput.value;
+          window.loadReviewWorkspace();
+        }, 280);
+      });
+    }
+
+    // 5. Select All Checkbox
+    const selectAllChk = document.getElementById("reviewSelectAll");
+    if (selectAllChk) {
+      selectAllChk.addEventListener("change", () => {
+        const isChecked = selectAllChk.checked;
+        selectedItemIds.clear();
+        if (isChecked) {
+          reviewItems.forEach(i => selectedItemIds.add(i.id));
+        }
+        renderReviewCards();
+        updateBulkToolbar();
+      });
+    }
+
+    // 6. Bulk Accept Button
+    const bulkAcceptBtn = document.getElementById("reviewBulkAcceptBtn");
+    if (bulkAcceptBtn) {
+      bulkAcceptBtn.addEventListener("click", handleBulkAccept);
+    }
+
+    // 7. Refresh Button
+    const refreshBtn = document.getElementById("reviewRefreshBtn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", () => {
+        window.loadReviewWorkspace();
+        showToast("Review findings queue refreshed.");
+      });
+    }
+
+    // 8. Audit Log Button
+    const auditBtn = document.getElementById("reviewViewAuditBtn");
+    if (auditBtn) {
+      auditBtn.addEventListener("click", openAuditModal);
+    }
+
+    // 9. Inspector Decision Buttons
+    const inspAcceptBtn = document.getElementById("inspAcceptBtn");
+    const inspEditBtn = document.getElementById("inspEditBtn");
+    const inspRejectBtn = document.getElementById("inspRejectBtn");
+    const inspCloseBtn = document.getElementById("inspCloseBtn");
+
+    if (inspAcceptBtn) {
+      inspAcceptBtn.addEventListener("click", () => {
+        if (activeItem) handleAcceptItem(activeItem.id);
+      });
+    }
+
+    if (inspEditBtn) {
+      inspEditBtn.addEventListener("click", () => {
+        if (activeItem) handleEditItem(activeItem.id);
+      });
+    }
+
+    if (inspRejectBtn) {
+      inspRejectBtn.addEventListener("click", () => {
+        if (activeItem) openRejectModal(activeItem.id);
+      });
+    }
+
+    if (inspCloseBtn) {
+      inspCloseBtn.addEventListener("click", closeInspector);
+    }
+
+    // 10. Inspect in Evidence Button
+    const inspJumpEvidenceBtn = document.getElementById("inspJumpEvidenceBtn");
+    if (inspJumpEvidenceBtn) {
+      inspJumpEvidenceBtn.addEventListener("click", () => {
+        if (typeof window.switchWorkspaceView === "function") {
+          window.switchWorkspaceView("evidence");
+          showToast(`Navigated to Evidence workspace for ${activeItem?.source_reference?.document_name || "document"}`);
+        }
+      });
+    }
+
+    // 11. Reject Modal Buttons
+    const rejectClose = document.getElementById("rejectModalCloseBtn");
+    const rejectCancel = document.getElementById("rejectModalCancelBtn");
+    const rejectConfirm = document.getElementById("rejectModalConfirmBtn");
+
+    if (rejectClose) rejectClose.addEventListener("click", closeRejectModal);
+    if (rejectCancel) rejectCancel.addEventListener("click", closeRejectModal);
+    if (rejectConfirm) rejectConfirm.addEventListener("click", confirmRejectItem);
+
+    // 12. Audit Modal Buttons
+    const auditClose = document.getElementById("auditModalCloseBtn");
+    const auditDone = document.getElementById("auditModalDoneBtn");
+
+    if (auditClose) auditClose.addEventListener("click", closeAuditModal);
+    if (auditDone) auditDone.addEventListener("click", closeAuditModal);
+
+    // Initial badge refresh
+    window.refreshReviewBadge();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bindReviewEvents);
+  } else {
+    bindReviewEvents();
   }
 })();

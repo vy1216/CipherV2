@@ -88,12 +88,39 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS review_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     case_id INTEGER NOT NULL,
-    suggestion_type TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'entity',
+    suggestion_type TEXT,
     title TEXT NOT NULL,
     description TEXT NOT NULL,
+    entity_id INTEGER,
+    relationship_id INTEGER,
+    location_id INTEGER,
+    event_id INTEGER,
+    evidence_id INTEGER,
     source_document TEXT,
-    confidence_score REAL NOT NULL DEFAULT 0.85,
+    source_reference TEXT,
+    extracted_context TEXT,
+    ai_output TEXT,
+    confidence REAL DEFAULT 0.85,
+    confidence_score REAL DEFAULT 0.85,
+    reason TEXT,
     status TEXT NOT NULL DEFAULT 'PENDING',
+    priority TEXT DEFAULT 'MEDIUM',
+    created_at TEXT DEFAULT (datetime('now')),
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    review_note TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS review_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_item_id INTEGER NOT NULL,
+    case_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    old_value_json TEXT,
+    new_value_json TEXT,
+    reason TEXT,
+    reviewer_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
 
@@ -165,6 +192,202 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
+
+// Migrate review_items table columns if previously created with partial schema
+try {
+  const existingCols = (db.prepare("PRAGMA table_info(review_items)").all() as any[]).map((c: any) => c.name);
+  const neededCols = [
+    { name: "type", type: "TEXT DEFAULT 'entity'" },
+    { name: "entity_id", type: "INTEGER" },
+    { name: "relationship_id", type: "INTEGER" },
+    { name: "location_id", type: "INTEGER" },
+    { name: "event_id", type: "INTEGER" },
+    { name: "evidence_id", type: "INTEGER" },
+    { name: "source_reference", type: "TEXT" },
+    { name: "extracted_context", type: "TEXT" },
+    { name: "ai_output", type: "TEXT" },
+    { name: "confidence", type: "REAL DEFAULT 0.85" },
+    { name: "reason", type: "TEXT" },
+    { name: "priority", type: "TEXT DEFAULT 'MEDIUM'" },
+    { name: "reviewed_at", type: "TEXT" },
+    { name: "reviewed_by", type: "TEXT" },
+    { name: "review_note", type: "TEXT" }
+  ];
+  for (const col of neededCols) {
+    if (!existingCols.includes(col.name)) {
+      db.exec(`ALTER TABLE review_items ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+} catch (e) {
+  console.warn("[CIPHER DB] Review items schema migration warning:", e);
+}
+
+// Seed review items for cases 1 and 2 if empty
+try {
+  const seedReviewItems = (caseId: number) => {
+    const count = (db.prepare("SELECT COUNT(*) as count FROM review_items WHERE case_id = ?").get(caseId) as any)?.count || 0;
+    if (count === 0) {
+      const stmt = db.prepare(`
+        INSERT INTO review_items (
+          case_id, type, suggestion_type, title, description,
+          source_document, source_reference, extracted_context,
+          ai_output, confidence, confidence_score, reason,
+          status, priority, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      `);
+
+      // 1. Entity finding (High confidence: 94%)
+      stmt.run(
+        caseId,
+        "entity",
+        "ENTITY_EXTRACTION",
+        "Rahul Mehta (Person)",
+        "Candidate person entity identified in intelligence debrief with linked telecom identifier.",
+        "Investigation_Report.pdf",
+        "Page 3",
+        "Rahul Mehta met Amit near Kucha Mahajani bullion vault to coordinate transit escrow and handoff of logistics manifests.",
+        JSON.stringify({
+          name: "Rahul Mehta",
+          type: "Person",
+          aliases: "R. Mehta",
+          extraction_method: "NER + structured identifier rule",
+          jurisdiction: "Delhi / NCR"
+        }),
+        0.94,
+        0.94,
+        "The system detected a person name associated with phone and transaction records. Extraction: NER + structured identifier rule.",
+        "PENDING",
+        "HIGH"
+      );
+
+      // 2. Relationship finding (High confidence: 97%)
+      stmt.run(
+        caseId,
+        "relationship",
+        "RELATIONSHIP_EXTRACTION",
+        "Rahul Mehta → USES_PHONE → 9876500011",
+        "Telecom CDR corroboration indicates primary device usage during consignment transit window.",
+        "CDR_2026_08.csv",
+        "Row 182",
+        "...Rahul Mehta used mobile 9876500011 during the call at 18:43 to confirm cargo arrival at Sector 10...",
+        JSON.stringify({
+          source: "Rahul Mehta",
+          relationship_type: "USES_PHONE",
+          target: "9876500011",
+          call_count: 14,
+          tower_cluster: "Sector 10 Industrial"
+        }),
+        0.97,
+        0.97,
+        "The system detected high-frequency outgoing call pattern paired with subscriber name in telecom manifest.",
+        "PENDING",
+        "HIGH"
+      );
+
+      // 3. Location finding (High confidence: 91%)
+      stmt.run(
+        caseId,
+        "location",
+        "LOCATION_EXTRACTION",
+        "Industrial Warehouse",
+        "Geocoded facility sighting identified in surveillance log and delivery manifest.",
+        "Field_Note_17.pdf",
+        "Page 2",
+        "Surveillance team observed delivery truck DL-01-AX-8812 arriving at Industrial Warehouse at 18 Industrial Road, Sector 10 at 18:30 hours...",
+        JSON.stringify({
+          name: "Industrial Warehouse",
+          type: "Place",
+          address: "18 Industrial Road, Sector 10",
+          latitude: 28.5879,
+          longitude: 77.3271
+        }),
+        0.91,
+        0.91,
+        "Geocoded address reference matched field surveillance report coordinate bounding box.",
+        "PENDING",
+        "HIGH"
+      );
+
+      // 4. Duplicate / Entity Resolution finding (Medium confidence: 89%)
+      stmt.run(
+        caseId,
+        "duplicate",
+        "ENTITY_RESOLUTION",
+        "Possible Duplicate: Rahul Mehta ⇄ R. Mehta",
+        "High phonetic similarity and matching physical surveillance traits across transport manifests.",
+        "CDR_2026_08.csv & Transport_Records.csv",
+        "Row 182 & Sheet 4",
+        "R. Mehta logged as vehicle escort driver for consignment #4491; matching phone 9876500011 in telecom log.",
+        JSON.stringify({
+          entity_a: "Rahul Mehta",
+          entity_b: "R. Mehta",
+          similarity: "93%",
+          matching_evidence: "Phone: 9876500011, Vehicle: PB10AB1234",
+          recommended_action: "Merge aliases"
+        }),
+        0.89,
+        0.89,
+        "Phonetic string distance score 0.93 and shared identifier token (MSISDN + vehicle registration).",
+        "PENDING",
+        "MEDIUM"
+      );
+
+      // 5. Event finding (Medium confidence: 88%)
+      stmt.run(
+        caseId,
+        "event",
+        "EVENT_EXTRACTION",
+        "Rahul Mehta Observed at Industrial Warehouse",
+        "Sighting milestone at logistics waypoint during surveillance observation.",
+        "Field_Note_17.pdf",
+        "Page 3",
+        "Target was observed entering the facility at 18:30 hours on 12 August 2026 before vehicle departure.",
+        JSON.stringify({
+          person: "Rahul Mehta",
+          event: "Observed at",
+          location: "Industrial Warehouse",
+          date: "2026-08-12",
+          time: "18:30",
+          coordinates: [77.3271, 28.5879]
+        }),
+        0.88,
+        0.88,
+        "Temporal-spatial extraction matching subject movement logs.",
+        "PENDING",
+        "MEDIUM"
+      );
+
+      // 6. Low Confidence finding (<70% for separate low-confidence tier)
+      stmt.run(
+        caseId,
+        "relationship",
+        "RELATIONSHIP_EXTRACTION",
+        "Rahul Mehta → ASSOCIATED_WITH → Unknown Caller 991122",
+        "Single brief connection with unverified roaming MSISDN flagged below primary confidence threshold.",
+        "CDR_2026_08.csv",
+        "Row 409",
+        "Single 3-second call recorded from roaming tower node 41; subscriber identity unconfirmed.",
+        JSON.stringify({
+          source: "Rahul Mehta",
+          relationship_type: "ASSOCIATED_WITH",
+          target: "Unknown Caller 991122",
+          call_count: 1,
+          duration_sec: 3
+        }),
+        0.62,
+        0.62,
+        "Low sample frequency (single interaction) below primary confidence threshold (70%). Placed in low-confidence review tier.",
+        "PENDING",
+        "LOW"
+      );
+    }
+  };
+
+  seedReviewItems(1);
+  seedReviewItems(2);
+} catch (seedErr) {
+  console.warn("[CIPHER DB] Seed review items warning:", seedErr);
+}
 
 // Pre-seed default entities & relationships for Falcon-77 case
 try {
@@ -966,63 +1189,705 @@ async function startServer() {
   });
 
   // ------------------------------------------------------------
-  // REVIEW QUEUE ROUTES
+  // REVIEW MODULE ROUTES (CIPHER HUMAN VERIFICATION SPEC)
   // ------------------------------------------------------------
-  app.get(["/cases/:case_id/review-queue", "/api/cases/:case_id/review-queue"], authenticateToken, (req, res) => {
-    const caseId = Number(req.params.case_id);
-    const items = db.prepare("SELECT * FROM review_items WHERE case_id = ?").all(caseId) as any[];
 
-    if (items.length === 0) {
-      return res.json({
-        status: "success",
-        case_id: caseId,
-        count: 4,
-        review_queue: [
-          {
-            id: 101,
-            suggestion_type: "ENTITY_MATCH",
-            title: "Entity Match Suggestion: Vikram Malhotra = 'Vicky'",
-            description: "Matched on phone number overlap + shared associate (Rafiq B.) + address partial match",
-            confidence_score: 0.92,
-            status: "PENDING",
-            source_document: "FIR-2291.pdf / Intercept Transcript INT-014",
-          },
-          {
-            id: 102,
-            suggestion_type: "RELATIONSHIP_EXTRACTION",
-            title: "Relationship: Sunita R. → FACILITATED → Courier",
-            description: "'Sunita R. facilitated air cargo clearance for the courier on 14 occasions...'",
-            confidence_score: 0.68,
-            status: "PENDING",
-            source_document: "Intelligence_report_0087.pdf",
-          },
-          {
-            id: 103,
-            suggestion_type: "SPATIAL_ANOMALY",
-            title: "Anomaly Flag: Burner MSISDN +91 98*** 23 Call Spike",
-            description: "Call frequency spiked 6.2x above rolling baseline in the 48h before FIR-2291 was filed",
-            confidence_score: 0.89,
-            status: "STATISTICAL_FLAG",
-            source_document: "CDR_batch_0912.csv",
-          },
-          {
-            id: 104,
-            suggestion_type: "ENTITY_RESOLUTION",
-            title: "Entity Resolution (Auto-Parked Below Threshold)",
-            description: "'S. Rao' (witness statement) vs 'Sunita Rao' — name similarity only, no corroborating attributes",
-            confidence_score: 0.41,
-            status: "PARKED_BELOW_THRESHOLD",
-            source_document: "Witness_statement_04.txt",
-          },
-        ],
-      });
+  // Helper to parse JSON safely
+  const parseJsonSafe = (str: any) => {
+    if (!str) return {};
+    if (typeof str === "object") return str;
+    try {
+      return JSON.parse(str);
+    } catch {
+      return { raw: str };
     }
+  };
+
+  // Helper to resolve entity by label or create verified entity
+  const getOrCreateVerifiedEntity = (caseId: number, label: string, entityType = "person", aliases = "") => {
+    const cleanLabel = (label || "").trim();
+    if (!cleanLabel) return null;
+    let ent = db.prepare("SELECT * FROM entities WHERE case_id = ? AND LOWER(label) = LOWER(?) LIMIT 1").get(caseId, cleanLabel) as any;
+    if (!ent) {
+      const res = db.prepare(`
+        INSERT INTO entities (case_id, label, entity_type, aliases, confidence_score, verification_status)
+        VALUES (?, ?, ?, ?, 1.0, 'verified')
+      `).run(caseId, cleanLabel, entityType.toLowerCase(), aliases || null);
+      ent = db.prepare("SELECT * FROM entities WHERE id = ?").get(Number(res.lastInsertRowid));
+    } else if (ent.verification_status !== "verified") {
+      db.prepare("UPDATE entities SET verification_status = 'verified' WHERE id = ?").run(ent.id);
+      ent.verification_status = "verified";
+    }
+    return ent;
+  };
+
+  // 1. GET /cases/:case_id/review - Review Queue with filters and metric summaries
+  app.get(["/cases/:case_id/review", "/api/cases/:case_id/review"], authenticateToken, (req, res) => {
+    const caseId = Number(req.params.case_id);
+    const { status, type, confidence, source, sort, search } = req.query as Record<string, string>;
+
+    let query = "SELECT * FROM review_items WHERE case_id = ?";
+    const params: any[] = [caseId];
+
+    // Status filter: defaults to PENDING if not specified or unless ALL is chosen
+    if (status && status.toUpperCase() !== "ALL") {
+      query += " AND UPPER(status) = ?";
+      params.push(status.toUpperCase());
+    } else if (!status) {
+      query += " AND UPPER(status) = 'PENDING'";
+    }
+
+    // Type filter
+    if (type && type.toUpperCase() !== "ALL") {
+      query += " AND LOWER(type) = ?";
+      params.push(type.toLowerCase());
+    }
+
+    // Confidence filter
+    if (confidence) {
+      const confUpper = confidence.toUpperCase();
+      if (confUpper === "HIGH") {
+        query += " AND (confidence >= 0.90 OR confidence_score >= 0.90)";
+      } else if (confUpper === "MEDIUM") {
+        query += " AND (confidence >= 0.70 AND confidence < 0.90)";
+      } else if (confUpper === "LOW") {
+        query += " AND (confidence < 0.70)";
+      }
+    }
+
+    // Source document filter
+    if (source && source.toUpperCase() !== "ALL") {
+      query += " AND source_document = ?";
+      params.push(source);
+    }
+
+    // Search query filter
+    if (search && search.trim()) {
+      const term = `%${search.trim().toLowerCase()}%`;
+      query += " AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR LOWER(extracted_context) LIKE ? OR LOWER(source_document) LIKE ?)";
+      params.push(term, term, term, term);
+    }
+
+    // Sorting
+    if (sort === "confidence") {
+      query += " ORDER BY confidence DESC, id DESC";
+    } else {
+      query += " ORDER BY id DESC";
+    }
+
+    const items = (db.prepare(query).all(...params) as any[]).map(item => {
+      const conf = item.confidence ?? item.confidence_score ?? 0.85;
+      let confLevel = "Medium";
+      if (conf >= 0.90) confLevel = "High";
+      else if (conf < 0.70) confLevel = "Low";
+      return {
+        ...item,
+        confidence: conf,
+        confidence_level: confLevel,
+        parsed_output: parseJsonSafe(item.ai_output)
+      };
+    });
+
+    // Compute live summary statistics for this case
+    const allPending = db.prepare("SELECT * FROM review_items WHERE case_id = ? AND UPPER(status) = 'PENDING'").all(caseId) as any[];
+    const pendingCount = allPending.length;
+
+    const byType = {
+      entity: allPending.filter(i => (i.type || "").toLowerCase() === "entity").length,
+      relationship: allPending.filter(i => (i.type || "").toLowerCase() === "relationship").length,
+      location: allPending.filter(i => (i.type || "").toLowerCase() === "location").length,
+      duplicate: allPending.filter(i => (i.type || "").toLowerCase() === "duplicate").length,
+      event: allPending.filter(i => (i.type || "").toLowerCase() === "event").length
+    };
+
+    const byConfidence = {
+      high: allPending.filter(i => (i.confidence ?? i.confidence_score ?? 0) >= 0.90).length,
+      medium: allPending.filter(i => {
+        const c = i.confidence ?? i.confidence_score ?? 0;
+        return c >= 0.70 && c < 0.90;
+      }).length,
+      low: allPending.filter(i => (i.confidence ?? i.confidence_score ?? 0) < 0.70).length
+    };
+
+    const verifiedCount = (db.prepare("SELECT COUNT(*) as count FROM review_items WHERE case_id = ? AND UPPER(status) IN ('ACCEPTED', 'EDITED')").get(caseId) as any)?.count || 0;
+    const rejectedCount = (db.prepare("SELECT COUNT(*) as count FROM review_items WHERE case_id = ? AND UPPER(status) = 'REJECTED'").get(caseId) as any)?.count || 0;
+    const editedCount = (db.prepare("SELECT COUNT(*) as count FROM review_items WHERE case_id = ? AND UPPER(status) = 'EDITED'").get(caseId) as any)?.count || 0;
+
+    // Distinct evidence sources
+    const sources = (db.prepare("SELECT DISTINCT source_document FROM review_items WHERE case_id = ? AND source_document IS NOT NULL").all(caseId) as any[]).map(r => r.source_document);
 
     return res.json({
       status: "success",
       case_id: caseId,
+      items,
       count: items.length,
-      review_queue: items,
+      sources,
+      summary: {
+        pending_count: pendingCount,
+        by_type: byType,
+        by_confidence: byConfidence,
+        metrics: {
+          pending: pendingCount,
+          verified_today: verifiedCount,
+          rejected_today: rejectedCount,
+          edited_today: editedCount
+        }
+      }
+    });
+  });
+
+  // 2. GET /review/:review_id - Full Review item detail
+  app.get(["/review/:review_id", "/api/review/:review_id"], authenticateToken, (req, res) => {
+    const reviewId = Number(req.params.review_id);
+    const item = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId) as any;
+    if (!item) {
+      return res.status(404).json({ detail: "Review item not found" });
+    }
+
+    const conf = item.confidence ?? item.confidence_score ?? 0.85;
+    let confLevel = "Medium";
+    if (conf >= 0.90) confLevel = "High";
+    else if (conf < 0.70) confLevel = "Low";
+
+    const parsedOutput = parseJsonSafe(item.ai_output);
+
+    // Fetch related entities in this case for investigator context
+    const relatedEntities = db.prepare(`
+      SELECT id, label, entity_type, aliases, verification_status
+      FROM entities
+      WHERE case_id = ? AND verification_status = 'verified'
+      ORDER BY id DESC LIMIT 10
+    `).all(item.case_id) as any[];
+
+    // Fetch audit actions for this review item
+    const actions = db.prepare(`
+      SELECT * FROM review_actions WHERE review_item_id = ? ORDER BY id DESC
+    `).all(reviewId) as any[];
+
+    return res.json({
+      status: "success",
+      item: {
+        ...item,
+        confidence: conf,
+        confidence_level: confLevel,
+        parsed_output: parsedOutput,
+        related_entities: relatedEntities,
+        actions
+      }
+    });
+  });
+
+  // 3. POST /review/:review_id/accept - Human acceptance gate
+  app.post(["/review/:review_id/accept", "/api/review/:review_id/accept"], authenticateToken, requireRole(["INVESTIGATOR", "SUPERVISOR", "ADMIN"]), (req, res) => {
+    const reviewId = Number(req.params.review_id);
+    const { reviewer_id, note } = req.body || {};
+    const user = (req as any).user;
+    const reviewer = reviewer_id || user?.full_name || user?.username || "INS001";
+
+    const item = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId) as any;
+    if (!item) {
+      return res.status(404).json({ detail: "Review item not found" });
+    }
+
+    const itemType = (item.type || "").toLowerCase();
+    const payload = parseJsonSafe(item.ai_output);
+    let verifiedRecord: any = null;
+
+    // Transition item to ACCEPTED
+    db.prepare(`
+      UPDATE review_items 
+      SET status = 'ACCEPTED', reviewed_at = datetime('now'), reviewed_by = ?, review_note = ?
+      WHERE id = ?
+    `).run(reviewer, note || "Accepted by investigator", reviewId);
+
+    // Commit verified data to corresponding investigative graph tables
+    try {
+      if (itemType === "entity") {
+        const name = payload.name || item.title.replace(/^Entity:\s*/i, "");
+        const entType = (payload.type || "person").toLowerCase();
+        const aliases = payload.aliases || "";
+        const ent = getOrCreateVerifiedEntity(item.case_id, name, entType, aliases);
+        if (ent) {
+          db.prepare("UPDATE review_items SET entity_id = ? WHERE id = ?").run(ent.id, reviewId);
+          verifiedRecord = ent;
+        }
+      } else if (itemType === "relationship") {
+        const sourceLabel = payload.source || (item.title.split("→")[0] || "").trim();
+        const relType = (payload.relationship_type || (item.title.split("→")[1] || "").trim() || "ASSOCIATED_WITH").toUpperCase();
+        const targetLabel = payload.target || (item.title.split("→")[2] || "").trim();
+
+        const sourceEnt = getOrCreateVerifiedEntity(item.case_id, sourceLabel, "person");
+        const targetEnt = getOrCreateVerifiedEntity(item.case_id, targetLabel, targetLabel.match(/^\+?\d{8,}$/) ? "phone" : "person");
+
+        if (sourceEnt && targetEnt) {
+          const relRes = db.prepare(`
+            INSERT INTO relationships (case_id, source_entity_id, target_entity_id, relationship_type, evidence_sentence, confidence_score, verification_status)
+            VALUES (?, ?, ?, ?, ?, 1.0, 'verified')
+          `).run(
+            item.case_id,
+            sourceEnt.id,
+            targetEnt.id,
+            relType,
+            item.extracted_context || item.description || "Verified via investigator review"
+          );
+          const relId = Number(relRes.lastInsertRowid);
+          db.prepare("UPDATE review_items SET relationship_id = ? WHERE id = ?").run(relId, reviewId);
+          verifiedRecord = { relationship_id: relId, source: sourceEnt.label, relationship_type: relType, target: targetEnt.label };
+        }
+      } else if (itemType === "location") {
+        const name = payload.name || item.title.replace(/^Location:\s*/i, "");
+        const lat = Number(payload.latitude || 28.5879);
+        const lng = Number(payload.longitude || 77.3271);
+        const address = payload.address || item.extracted_context || name;
+
+        // Place entity in entities table
+        const placeEnt = getOrCreateVerifiedEntity(item.case_id, name, "place", address);
+        if (placeEnt) {
+          db.prepare("UPDATE entities SET latitude = ?, longitude = ? WHERE id = ?").run(lat, lng, placeEnt.id);
+        }
+
+        // Location in locations table
+        const locRes = db.prepare(`
+          INSERT INTO locations (case_id, entity_id, label, latitude, longitude, location_type, address_text, verification_status)
+          VALUES (?, ?, ?, ?, ?, 'facility', ?, 'verified')
+        `).run(item.case_id, placeEnt?.id || null, name, lat, lng, address);
+
+        const locId = Number(locRes.lastInsertRowid);
+        db.prepare("UPDATE review_items SET location_id = ? WHERE id = ?").run(locId, reviewId);
+        verifiedRecord = { location_id: locId, name, latitude: lat, longitude: lng, address };
+      } else if (itemType === "event") {
+        const eventTitle = item.title.replace(/^Event:\s*/i, "");
+        const personName = payload.person || "Subject";
+        const dateStr = payload.date || new Date().toISOString().split("T")[0];
+        const timeStr = payload.time || "12:00";
+        const evRes = db.prepare(`
+          INSERT INTO spatial_events (case_id, entity_name, entity_type, location_id, timestamp, confidence_score, source_document)
+          VALUES (?, ?, 'PERSON', 1, ?, 1.0, ?)
+        `).run(item.case_id, personName, `${dateStr} ${timeStr}`, item.source_document || "Field Report");
+        const evId = Number(evRes.lastInsertRowid);
+        db.prepare("UPDATE review_items SET event_id = ? WHERE id = ?").run(evId, reviewId);
+        verifiedRecord = { event_id: evId, title: eventTitle, timestamp: `${dateStr} ${timeStr}` };
+      } else if (itemType === "duplicate") {
+        const entA = payload.entity_a || "";
+        const entB = payload.entity_b || "";
+        if (entA && entB) {
+          const primary = db.prepare("SELECT * FROM entities WHERE case_id = ? AND LOWER(label) = LOWER(?) LIMIT 1").get(item.case_id, entA) as any;
+          if (primary) {
+            const curAliases = primary.aliases || "";
+            if (!curAliases.includes(entB)) {
+              const newAliases = curAliases ? `${curAliases}; ${entB}` : entB;
+              db.prepare("UPDATE entities SET aliases = ? WHERE id = ?").run(newAliases, primary.id);
+            }
+          }
+        }
+        verifiedRecord = { duplicate_resolved: true, entity_a: entA, entity_b: entB };
+      }
+    } catch (graphErr) {
+      console.warn("[CIPHER REVIEW] Error committing verified finding to graph:", graphErr);
+    }
+
+    // Insert immutable audit action in review_actions
+    db.prepare(`
+      INSERT INTO review_actions (review_item_id, case_id, action, old_value_json, new_value_json, reason, reviewer_id)
+      VALUES (?, ?, 'ACCEPT', ?, ?, ?, ?)
+    `).run(
+      reviewId,
+      item.case_id,
+      item.ai_output || "{}",
+      JSON.stringify(verifiedRecord || payload),
+      note || "Investigator verified and accepted finding",
+      reviewer
+    );
+
+    // Chain of custody log
+    db.prepare(`
+      INSERT INTO chain_of_custody_logs (case_id, action, sha256_hash, actor_name)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      item.case_id,
+      `REVIEW_ACCEPT: Item #${reviewId} (${item.type}) "${item.title}" verified by ${reviewer}`,
+      `0x${Date.now().toString(16)}`,
+      reviewer
+    );
+
+    const updated = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId);
+    return res.json({
+      status: "success",
+      message: `Finding #${reviewId} accepted and committed as verified investigative data.`,
+      review_item: updated,
+      verified_data: verifiedRecord
+    });
+  });
+
+  // 4. POST /review/:review_id/edit - Human edit and verification gate
+  app.post(["/review/:review_id/edit", "/api/review/:review_id/edit"], authenticateToken, requireRole(["INVESTIGATOR", "SUPERVISOR", "ADMIN"]), (req, res) => {
+    const reviewId = Number(req.params.review_id);
+    const { reviewer_id, changes, note } = req.body || {};
+    const user = (req as any).user;
+    const reviewer = reviewer_id || user?.full_name || user?.username || "INS001";
+
+    const item = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId) as any;
+    if (!item) {
+      return res.status(404).json({ detail: "Review item not found" });
+    }
+
+    const itemType = (item.type || "").toLowerCase();
+    const oldPayload = parseJsonSafe(item.ai_output);
+    const newPayload = { ...oldPayload, ...(changes || {}) };
+
+    // Controlled vocabulary check for relationships
+    const VALID_RELATIONSHIPS = [
+      "CALLS", "USES_PHONE", "OWNS", "DRIVES", "VISITED", "WORKS_FOR",
+      "TRANSFERS_TO", "ASSOCIATED_WITH", "OBSERVED_AT", "LOCATED_AT"
+    ];
+
+    if (itemType === "relationship" && newPayload.relationship_type) {
+      const normalizedRel = newPayload.relationship_type.toUpperCase().replace(/\s+/g, "_");
+      if (VALID_RELATIONSHIPS.includes(normalizedRel)) {
+        newPayload.relationship_type = normalizedRel;
+      }
+    }
+
+    // New title computed from changes
+    let newTitle = item.title;
+    if (itemType === "relationship") {
+      newTitle = `${newPayload.source || "Subject"} → ${newPayload.relationship_type || "ASSOCIATED_WITH"} → ${newPayload.target || "Target"}`;
+    } else if (itemType === "entity") {
+      newTitle = `${newPayload.name || "Entity"} (${newPayload.type || "Person"})`;
+    } else if (itemType === "location") {
+      newTitle = `Location: ${newPayload.name || "Location"}`;
+    }
+
+    db.prepare(`
+      UPDATE review_items
+      SET status = 'EDITED', title = ?, ai_output = ?, reviewed_at = datetime('now'), reviewed_by = ?, review_note = ?
+      WHERE id = ?
+    `).run(newTitle, JSON.stringify(newPayload), reviewer, note || "Investigator edited and verified finding", reviewId);
+
+    // Commit modified finding to verified graph tables
+    let verifiedRecord: any = null;
+    try {
+      if (itemType === "entity") {
+        const ent = getOrCreateVerifiedEntity(item.case_id, newPayload.name || item.title, newPayload.type || "person", newPayload.aliases || "");
+        verifiedRecord = ent;
+      } else if (itemType === "relationship") {
+        const sEnt = getOrCreateVerifiedEntity(item.case_id, newPayload.source, "person");
+        const tEnt = getOrCreateVerifiedEntity(item.case_id, newPayload.target, newPayload.target?.match(/^\+?\d{8,}$/) ? "phone" : "person");
+        if (sEnt && tEnt) {
+          const relRes = db.prepare(`
+            INSERT INTO relationships (case_id, source_entity_id, target_entity_id, relationship_type, evidence_sentence, confidence_score, verification_status)
+            VALUES (?, ?, ?, ?, ?, 1.0, 'verified')
+          `).run(
+            item.case_id,
+            sEnt.id,
+            tEnt.id,
+            newPayload.relationship_type || "ASSOCIATED_WITH",
+            item.extracted_context || item.description || "Verified via investigator edit"
+          );
+          verifiedRecord = { relationship_id: Number(relRes.lastInsertRowid), source: sEnt.label, relationship_type: newPayload.relationship_type, target: tEnt.label };
+        }
+      } else if (itemType === "location") {
+        const lat = Number(newPayload.latitude || 28.5879);
+        const lng = Number(newPayload.longitude || 77.3271);
+        const locRes = db.prepare(`
+          INSERT INTO locations (case_id, label, latitude, longitude, location_type, address_text, verification_status)
+          VALUES (?, ?, ?, ?, 'facility', ?, 'verified')
+        `).run(item.case_id, newPayload.name, lat, lng, newPayload.address || newPayload.name);
+        verifiedRecord = { location_id: Number(locRes.lastInsertRowid), name: newPayload.name, latitude: lat, longitude: lng };
+      }
+    } catch (graphErr) {
+      console.warn("[CIPHER REVIEW] Error committing edited finding to graph:", graphErr);
+    }
+
+    // Record audit action
+    db.prepare(`
+      INSERT INTO review_actions (review_item_id, case_id, action, old_value_json, new_value_json, reason, reviewer_id)
+      VALUES (?, ?, 'EDIT', ?, ?, ?, ?)
+    `).run(
+      reviewId,
+      item.case_id,
+      JSON.stringify(oldPayload),
+      JSON.stringify(newPayload),
+      note || "Investigator modified and verified finding",
+      reviewer
+    );
+
+    // Chain of custody log
+    db.prepare(`
+      INSERT INTO chain_of_custody_logs (case_id, action, sha256_hash, actor_name)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      item.case_id,
+      `REVIEW_EDIT: Item #${reviewId} (${item.type}) modified and verified by ${reviewer}`,
+      `0x${Date.now().toString(16)}`,
+      reviewer
+    );
+
+    const updated = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId);
+    return res.json({
+      status: "success",
+      message: `Finding #${reviewId} edited and verified.`,
+      review_item: updated,
+      verified_data: verifiedRecord
+    });
+  });
+
+  // 5. POST /review/:review_id/reject - Human rejection gate (reason mandatory)
+  app.post(["/review/:review_id/reject", "/api/review/:review_id/reject"], authenticateToken, requireRole(["INVESTIGATOR", "SUPERVISOR", "ADMIN"]), (req, res) => {
+    const reviewId = Number(req.params.review_id);
+    const { reviewer_id, reason, note } = req.body || {};
+    const user = (req as any).user;
+    const reviewer = reviewer_id || user?.full_name || user?.username || "INS001";
+
+    if (!reason && !note) {
+      return res.status(400).json({ detail: "A valid rejection reason or note is required." });
+    }
+
+    const item = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId) as any;
+    if (!item) {
+      return res.status(404).json({ detail: "Review item not found" });
+    }
+
+    // Set status to REJECTED - never deletes the item
+    db.prepare(`
+      UPDATE review_items
+      SET status = 'REJECTED', reviewed_at = datetime('now'), reviewed_by = ?, review_note = ?
+      WHERE id = ?
+    `).run(reviewer, `${reason || "Rejected"}: ${note || ""}`, reviewId);
+
+    // Ensure any linked entity or relationship is marked rejected so it NEVER enters graph/map
+    if (item.entity_id) {
+      db.prepare("UPDATE entities SET verification_status = 'rejected' WHERE id = ?").run(item.entity_id);
+    }
+    if (item.relationship_id) {
+      db.prepare("UPDATE relationships SET verification_status = 'rejected' WHERE id = ?").run(item.relationship_id);
+    }
+    if (item.location_id) {
+      db.prepare("UPDATE locations SET verification_status = 'rejected' WHERE id = ?").run(item.location_id);
+    }
+
+    // Record audit action
+    db.prepare(`
+      INSERT INTO review_actions (review_item_id, case_id, action, old_value_json, new_value_json, reason, reviewer_id)
+      VALUES (?, ?, 'REJECT', ?, '{}', ?, ?)
+    `).run(
+      reviewId,
+      item.case_id,
+      item.ai_output || "{}",
+      `${reason || "Rejected"}: ${note || ""}`,
+      reviewer
+    );
+
+    // Chain of custody log
+    db.prepare(`
+      INSERT INTO chain_of_custody_logs (case_id, action, sha256_hash, actor_name)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      item.case_id,
+      `REVIEW_REJECT: Item #${reviewId} rejected by ${reviewer} - Reason: ${reason || note}`,
+      `0x${Date.now().toString(16)}`,
+      reviewer
+    );
+
+    const updated = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId);
+    return res.json({
+      status: "success",
+      message: `Finding #${reviewId} rejected and excluded from trusted investigative records.`,
+      review_item: updated
+    });
+  });
+
+  // 6. POST /review/:review_id/merge - Entity duplicate resolution
+  app.post(["/review/:review_id/merge", "/api/review/:review_id/merge"], authenticateToken, requireRole(["INVESTIGATOR", "SUPERVISOR", "ADMIN"]), (req, res) => {
+    const reviewId = Number(req.params.review_id);
+    const { reviewer_id, note } = req.body || {};
+    const user = (req as any).user;
+    const reviewer = reviewer_id || user?.full_name || user?.username || "INS001";
+
+    const item = db.prepare("SELECT * FROM review_items WHERE id = ?").get(reviewId) as any;
+    if (!item) {
+      return res.status(404).json({ detail: "Review item not found" });
+    }
+
+    const payload = parseJsonSafe(item.ai_output);
+    const entA = payload.entity_a || "";
+    const entB = payload.entity_b || "";
+
+    if (entA && entB) {
+      const primary = db.prepare("SELECT * FROM entities WHERE case_id = ? AND LOWER(label) = LOWER(?) LIMIT 1").get(item.case_id, entA) as any;
+      if (primary) {
+        const curAliases = primary.aliases || "";
+        if (!curAliases.includes(entB)) {
+          const newAliases = curAliases ? `${curAliases}; ${entB}` : entB;
+          db.prepare("UPDATE entities SET aliases = ? WHERE id = ?").run(newAliases, primary.id);
+        }
+      }
+    }
+
+    db.prepare(`
+      UPDATE review_items
+      SET status = 'ACCEPTED', reviewed_at = datetime('now'), reviewed_by = ?, review_note = ?
+      WHERE id = ?
+    `).run(reviewer, note || "Duplicate entities merged", reviewId);
+
+    db.prepare(`
+      INSERT INTO review_actions (review_item_id, case_id, action, old_value_json, new_value_json, reason, reviewer_id)
+      VALUES (?, ?, 'MERGE', ?, ?, ?, ?)
+    `).run(
+      reviewId,
+      item.case_id,
+      item.ai_output || "{}",
+      JSON.stringify({ merged: true, primary: entA, alias: entB }),
+      note || "Entities merged by investigator",
+      reviewer
+    );
+
+    return res.json({
+      status: "success",
+      message: `Duplicate entities merged into primary entity record: ${entA}.`
+    });
+  });
+
+  // 7. POST /review/bulk-accept - Batch Human Verification Gate
+  app.post(["/review/bulk-accept", "/api/review/bulk-accept"], authenticateToken, requireRole(["INVESTIGATOR", "SUPERVISOR", "ADMIN"]), (req, res) => {
+    const { review_ids, reviewer_id, note } = req.body || {};
+    if (!Array.isArray(review_ids) || review_ids.length === 0) {
+      return res.status(400).json({ detail: "Array of review_ids is required for bulk accept." });
+    }
+
+    const user = (req as any).user;
+    const reviewer = reviewer_id || user?.full_name || user?.username || "INS001";
+    let acceptedCount = 0;
+
+    for (const rid of review_ids) {
+      const item = db.prepare("SELECT * FROM review_items WHERE id = ? AND UPPER(status) = 'PENDING'").get(Number(rid)) as any;
+      if (item) {
+        db.prepare(`
+          UPDATE review_items
+          SET status = 'ACCEPTED', reviewed_at = datetime('now'), reviewed_by = ?, review_note = ?
+          WHERE id = ?
+        `).run(reviewer, note || "Batch verified by investigator", item.id);
+
+        // Auto-commit entity or relationship
+        try {
+          const payload = parseJsonSafe(item.ai_output);
+          const itemType = (item.type || "").toLowerCase();
+          if (itemType === "entity") {
+            getOrCreateVerifiedEntity(item.case_id, payload.name || item.title, payload.type || "person", payload.aliases || "");
+          } else if (itemType === "relationship") {
+            const sEnt = getOrCreateVerifiedEntity(item.case_id, payload.source || (item.title.split("→")[0] || "").trim(), "person");
+            const tEnt = getOrCreateVerifiedEntity(item.case_id, payload.target || (item.title.split("→")[2] || "").trim(), "person");
+            if (sEnt && tEnt) {
+              db.prepare(`
+                INSERT INTO relationships (case_id, source_entity_id, target_entity_id, relationship_type, evidence_sentence, confidence_score, verification_status)
+                VALUES (?, ?, ?, ?, ?, 1.0, 'verified')
+              `).run(item.case_id, sEnt.id, tEnt.id, payload.relationship_type || "ASSOCIATED_WITH", item.extracted_context || item.description);
+            }
+          } else if (itemType === "location") {
+            const lat = Number(payload.latitude || 28.5879);
+            const lng = Number(payload.longitude || 77.3271);
+            db.prepare(`
+              INSERT INTO locations (case_id, label, latitude, longitude, location_type, address_text, verification_status)
+              VALUES (?, ?, ?, ?, 'facility', ?, 'verified')
+            `).run(item.case_id, payload.name || item.title, lat, lng, payload.address || payload.name);
+          }
+        } catch (e) {
+          console.warn("[CIPHER REVIEW] Bulk accept commit warning:", e);
+        }
+
+        db.prepare(`
+          INSERT INTO review_actions (review_item_id, case_id, action, old_value_json, new_value_json, reason, reviewer_id)
+          VALUES (?, ?, 'ACCEPT', ?, '{}', ?, ?)
+        `).run(item.id, item.case_id, item.ai_output || "{}", note || "Batch accepted by investigator", reviewer);
+
+        acceptedCount++;
+      }
+    }
+
+    return res.json({
+      status: "success",
+      accepted_count: acceptedCount,
+      message: `Successfully verified ${acceptedCount} findings.`
+    });
+  });
+
+  // 8. GET /cases/:case_id/review/history - Full Audit Trail of Verification Decisions
+  app.get(["/cases/:case_id/review/history", "/api/cases/:case_id/review/history"], authenticateToken, (req, res) => {
+    const caseId = Number(req.params.case_id);
+    const history = db.prepare(`
+      SELECT a.*, r.title, r.type as finding_type, r.source_document
+      FROM review_actions a
+      JOIN review_items r ON a.review_item_id = r.id
+      WHERE a.case_id = ?
+      ORDER BY a.id DESC
+      LIMIT 100
+    `).all(caseId) as any[];
+
+    return res.json({
+      status: "success",
+      case_id: caseId,
+      history: history.map(h => ({
+        ...h,
+        old_value: parseJsonSafe(h.old_value_json),
+        new_value: parseJsonSafe(h.new_value_json)
+      }))
+    });
+  });
+
+  // 9. POST /cases/:case_id/review/create-from-ai - Route AI Investigator findings to Review Queue
+  app.post(["/cases/:case_id/review/create-from-ai", "/api/cases/:case_id/review/create-from-ai"], authenticateToken, (req, res) => {
+    const caseId = Number(req.params.case_id);
+    const { type, title, description, source_document, source_reference, extracted_context, ai_output, confidence, reason, priority } = req.body || {};
+
+    if (!title) {
+      return res.status(400).json({ detail: "Finding title is required." });
+    }
+
+    const conf = Number(confidence || 0.85);
+    const findingType = (type || "entity").toLowerCase();
+
+    const insertRes = db.prepare(`
+      INSERT INTO review_items (
+        case_id, type, suggestion_type, title, description,
+        source_document, source_reference, extracted_context,
+        ai_output, confidence, confidence_score, reason,
+        status, priority, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, datetime('now'))
+    `).run(
+      caseId,
+      findingType,
+      `AI_${findingType.toUpperCase()}`,
+      title,
+      description || "Generated by AI Investigator Copilot",
+      source_document || "AI Analysis Workspace",
+      source_reference || "Copilot Extraction",
+      extracted_context || "",
+      typeof ai_output === "object" ? JSON.stringify(ai_output) : (ai_output || "{}"),
+      conf,
+      conf,
+      reason || "Suggested during investigative analysis query.",
+      priority || (conf >= 0.90 ? "HIGH" : "MEDIUM")
+    );
+
+    const newId = Number(insertRes.lastInsertRowid);
+    const createdItem = db.prepare("SELECT * FROM review_items WHERE id = ?").get(newId);
+
+    return res.json({
+      status: "success",
+      message: "Finding routed to Review Queue for human verification.",
+      review_item: createdItem
+    });
+  });
+
+  // Backward compatibility routes for legacy /cases/:case_id/review-queue
+  app.get(["/cases/:case_id/review-queue", "/api/cases/:case_id/review-queue"], authenticateToken, (req, res) => {
+    const caseId = Number(req.params.case_id);
+    const items = db.prepare("SELECT * FROM review_items WHERE case_id = ?").all(caseId) as any[];
+    return res.json({
+      status: "success",
+      case_id: caseId,
+      count: items.length,
+      review_queue: items
     });
   });
 

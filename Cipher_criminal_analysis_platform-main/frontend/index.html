@@ -416,7 +416,7 @@
   <section class="cipher-workspace" id="cipherWorkspace" aria-hidden="true">
     <header class="workspace-nav"><div class="workspace-nav-left"><button class="workspace-back" id="workspaceBack" type="button" aria-label="Go back to previous workspace screen" title="Back to previous screen">← <span>BACK</span></button><a class="brand" href="#top"><span class="brand-mark">C</span><span>CIPHER</span></a></div><div class="workspace-case"><span>CASE /</span> BLACKBIRD_042 <i></i> ACTIVE INVESTIGATION</div><button class="workspace-exit" id="workspaceExit">EXIT WORKSPACE</button></header>
     <div class="workspace-body">
-      <aside class="workspace-sidebar"><div class="side-label">INVESTIGATION</div><button class="side-item active" data-view="cases">⌂ <span>Cases</span></button><button class="side-item" data-view="network">◎ <span>Network</span></button><button class="side-item" data-view="gis">⌖ <span>GIS</span></button><button class="side-item" data-view="timeline">⌁ <span>Timeline</span></button><button class="side-item" data-view="evidence">◈ <span>Evidence</span></button><button class="side-item" data-view="ai-investigator">✦ <span>AI Investigator</span></button><div class="side-bottom"><span>148 ENTITIES</span><span>392 LINKS</span><span>67 EVIDENCE</span></div></aside>
+      <aside class="workspace-sidebar"><div class="side-label">INVESTIGATION</div><button class="side-item active" data-view="cases">⌂ <span>Cases</span></button><button class="side-item" data-view="network">◎ <span>Network</span></button><button class="side-item" data-view="gis">⌖ <span>GIS</span></button><button class="side-item" data-view="timeline">⌁ <span>Timeline</span></button><button class="side-item" data-view="evidence">◈ <span>Evidence</span></button><button class="side-item" data-view="ai-investigator">✦ <span>AI Investigator</span></button><button class="side-item" data-view="review" id="reviewNavBtn">☑ <span>Review</span> <span class="review-nav-badge" id="reviewNavBadge" style="display:none;background:#ff3344;color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:10px;margin-left:auto;">0</span></button><div class="side-bottom"><span>148 ENTITIES</span><span>392 LINKS</span><span>67 EVIDENCE</span></div></aside>
       <main class="case-room">
         <section class="workspace-view active-view" id="casesView">
           <div class="case-room-head"><div><span class="room-kicker">001 / CASE INTELLIGENCE</span><h1>Cases</h1><p>Active investigations, connected evidence and emerging risk signals.</p></div><div style="display:flex;gap:10px;align-items:center;"><button class="contextual-ai-btn" id="casesAskCipherBtn" type="button">✦ <span>ASK CIPHER</span></button><button class="new-case" id="newCaseBtn">+ NEW CASE</button></div></div>
@@ -917,6 +917,339 @@
             <span id="aiFooterStatus">VERIFIED REASONING ENGINE ACTIVE</span>
           </div>
         </section>
+
+        <!-- ============================================================
+             007 / HUMAN VERIFICATION & REVIEW SECTION
+             ============================================================ -->
+        <section class="workspace-view review-view" id="reviewView" aria-label="Review workspace">
+          <!-- Room Head -->
+          <div class="review-screen-head">
+            <div>
+              <span class="room-kicker">007 / HUMAN VERIFICATION LAYER &amp; ADJUDICATION</span>
+              <h1>Review Queue</h1>
+              <p>Mandatory human-in-the-loop verification for candidate entities, relationships, geolocations, and deduplication proposals before promotion to trusted case ledger.</p>
+            </div>
+            <div class="review-screen-controls">
+              <div class="review-screen-status">
+                <i class="status-dot-active"></i>
+                <span>HUMAN-IN-THE-LOOP ACTIVE</span>
+                <b id="reviewCaseKicker">CASE / C-2026-014</b>
+              </div>
+              <div class="review-header-btns">
+                <button type="button" class="review-btn secondary" id="reviewRefreshBtn" title="Reload queue findings">↻ REFRESH</button>
+                <button type="button" class="review-btn secondary" id="reviewViewAuditBtn" title="View historical adjudication audit trail">📜 AUDIT LOG</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Top Metric Cards -->
+          <div class="review-metrics-row">
+            <div class="review-metric-card pending">
+              <div class="metric-top">
+                <span class="metric-label">PENDING VERIFICATION</span>
+                <span class="metric-dot yellow"></span>
+              </div>
+              <div class="metric-value" id="reviewStatPending">6</div>
+              <div class="metric-sub">Candidate findings awaiting sign-off</div>
+            </div>
+
+            <div class="review-metric-card verified">
+              <div class="metric-top">
+                <span class="metric-label">VERIFIED (COMMITTED)</span>
+                <span class="metric-dot green"></span>
+              </div>
+              <div class="metric-value" id="reviewStatVerified">0</div>
+              <div class="metric-sub">Promoted into trusted graph &amp; GIS</div>
+            </div>
+
+            <div class="review-metric-card rejected">
+              <div class="metric-top">
+                <span class="metric-label">REJECTED (EXCLUDED)</span>
+                <span class="metric-dot red"></span>
+              </div>
+              <div class="metric-value" id="reviewStatRejected">0</div>
+              <div class="metric-sub">Discarded from ledger with audit notes</div>
+            </div>
+
+            <div class="review-metric-card edited">
+              <div class="metric-top">
+                <span class="metric-label">INVESTIGATOR EDITED</span>
+                <span class="metric-dot blue"></span>
+              </div>
+              <div class="metric-value" id="reviewStatEdited">0</div>
+              <div class="metric-sub">Modified before verification commit</div>
+            </div>
+          </div>
+
+          <!-- Filter and Bulk Action Controls -->
+          <div class="review-toolbar">
+            <!-- Category Tabs -->
+            <div class="review-category-tabs">
+              <button type="button" class="review-tab-btn active" data-type="ALL" id="reviewTabAll">
+                <span>ALL FINDINGS</span>
+                <b class="tab-count" id="tabCountAll">6</b>
+              </button>
+              <button type="button" class="review-tab-btn" data-type="entity" id="reviewTabEntity">
+                <span>ENTITIES</span>
+                <b class="tab-count" id="tabCountEntity">1</b>
+              </button>
+              <button type="button" class="review-tab-btn" data-type="relationship" id="reviewTabRelationship">
+                <span>RELATIONSHIPS</span>
+                <b class="tab-count" id="tabCountRelationship">2</b>
+              </button>
+              <button type="button" class="review-tab-btn" data-type="location" id="reviewTabLocation">
+                <span>LOCATIONS</span>
+                <b class="tab-count" id="tabCountLocation">1</b>
+              </button>
+              <button type="button" class="review-tab-btn" data-type="duplicate" id="reviewTabDuplicate">
+                <span>DUPLICATES</span>
+                <b class="tab-count" id="tabCountDuplicate">1</b>
+              </button>
+              <button type="button" class="review-tab-btn" data-type="event" id="reviewTabEvent">
+                <span>EVENTS</span>
+                <b class="tab-count" id="tabCountEvent">1</b>
+              </button>
+              <button type="button" class="review-tab-btn review-tab-low" data-type="low_conf" id="reviewTabLowConf">
+                <span>LOW CONF (&lt;70%)</span>
+                <b class="tab-count" id="tabCountLowConf">1</b>
+              </button>
+            </div>
+
+            <!-- Secondary Filter Controls -->
+            <div class="review-secondary-bar">
+              <div class="review-search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="reviewSearchInput" placeholder="Filter findings, names, citations..." />
+              </div>
+
+              <div class="review-dropdown-group">
+                <label for="reviewStatusSelect">Status:</label>
+                <select id="reviewStatusSelect" class="review-select">
+                  <option value="PENDING" selected>Pending (Default)</option>
+                  <option value="ACCEPTED">Verified / Accepted</option>
+                  <option value="EDITED">Investigator Edited</option>
+                  <option value="REJECTED">Rejected</option>
+                  <option value="ALL">All Statuses</option>
+                </select>
+              </div>
+
+              <div class="review-dropdown-group">
+                <label for="reviewSourceSelect">Source:</label>
+                <select id="reviewSourceSelect" class="review-select">
+                  <option value="ALL">All Evidence Documents</option>
+                </select>
+              </div>
+
+              <!-- Bulk Action Controls -->
+              <div class="review-bulk-actions">
+                <label class="review-select-all-label">
+                  <input type="checkbox" id="reviewSelectAll" />
+                  <span>Select All</span>
+                </label>
+                <button type="button" class="review-btn review-btn-bulk-accept" id="reviewBulkAcceptBtn" disabled>
+                  ✓ ACCEPT SELECTED (<span id="reviewSelectedCount">0</span>)
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Main Workspace Split Grid -->
+          <div class="review-workspace-grid">
+            <!-- Left Column: Findings Queue -->
+            <div class="review-queue-column">
+              <div class="review-queue-header">
+                <span id="reviewQueueListTitle">PENDING FINDINGS QUEUE (6)</span>
+                <span class="review-queue-sort-note">Ordered by timestamp &amp; confidence</span>
+              </div>
+
+              <div class="review-cards-list" id="reviewItemsList">
+                <!-- Dynamically populated review item cards -->
+              </div>
+
+              <div class="review-empty-state" id="reviewEmptyState" style="display: none;">
+                <div class="review-empty-icon">✓</div>
+                <h3>Queue Clear</h3>
+                <p>No findings matching the selected filters. All candidate extractions have been adjudicated.</p>
+              </div>
+            </div>
+
+            <!-- Right Column: Adjudication & Comparison Inspector -->
+            <div class="review-inspector-column">
+              <!-- Empty state when no item selected -->
+              <div class="review-inspector-empty" id="reviewInspectorEmpty">
+                <div class="inspector-empty-icon">⚖</div>
+                <h3>Adjudication Inspector</h3>
+                <p>Select any finding from the queue on the left to inspect evidence provenance, compare against existing case graph records, edit attributes, or adjudicate.</p>
+              </div>
+
+              <!-- Active Inspector Panel -->
+              <div class="review-inspector-panel" id="reviewInspectorPanel" style="display: none;">
+                <!-- Header -->
+                <div class="inspector-panel-head">
+                  <div class="inspector-panel-title-group">
+                    <div class="inspector-badge-row">
+                      <span class="finding-type-badge" id="inspFindingTypeBadge">ENTITY</span>
+                      <span class="finding-conf-badge" id="inspConfidenceBadge">94% HIGH</span>
+                      <span class="finding-status-badge" id="inspStatusBadge">PENDING</span>
+                    </div>
+                    <h2 id="inspFindingTitle">Rahul Mehta (Person)</h2>
+                  </div>
+                  <div class="inspector-head-actions">
+                    <button type="button" class="review-btn-close-insp" id="inspCloseBtn" title="Close Inspector">✕</button>
+                  </div>
+                </div>
+
+                <div class="inspector-scroll-body">
+                  <!-- Section 1: Provenance & Evidence Excerpt -->
+                  <div class="inspector-section">
+                    <div class="inspector-section-label">01 / EVIDENCE CITATION &amp; EXCERPT</div>
+                    <div class="inspector-evidence-box">
+                      <div class="evidence-source-meta">
+                        <span class="doc-icon">📄</span>
+                        <b id="inspDocName">Investigation_Report.pdf</b>
+                        <span class="doc-ref-chip" id="inspDocRef">Page 3</span>
+                        <button type="button" class="btn-inspect-in-evidence" id="inspJumpEvidenceBtn" title="View in Evidence Workspace">INSPECT IN EVIDENCE ↗</button>
+                      </div>
+                      <blockquote class="evidence-quote-snippet" id="inspEvidenceSnippet">
+                        "Rahul Mehta met Amit near Kucha Mahajani bullion vault to coordinate transit escrow and handoff of logistics manifests."
+                      </blockquote>
+                    </div>
+                  </div>
+
+                  <!-- Section 2: AI Extraction Rationale -->
+                  <div class="inspector-section">
+                    <div class="inspector-section-label">02 / AI REASONING &amp; EXTRACTION LOGIC</div>
+                    <div class="inspector-ai-box">
+                      <p id="inspAiReason">The system detected a person name associated with phone and transaction records. Extraction: NER + structured identifier rule.</p>
+                      <div class="confidence-breakdown-bar">
+                        <span>CONFIDENCE SCORE</span>
+                        <div class="conf-bar-outer">
+                          <div class="conf-bar-fill green" id="inspConfBarFill" style="width: 94%;"></div>
+                        </div>
+                        <b id="inspConfScoreText">0.94 (High)</b>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Section 3: Existing Graph Comparison (Deduplication / Conflict Check) -->
+                  <div class="inspector-section" id="inspComparisonSection">
+                    <div class="inspector-section-label">03 / EXISTING GRAPH KNOWLEDGE COMPARISON</div>
+                    <div class="inspector-comparison-box" id="inspComparisonBox">
+                      <!-- Dynamically populated: Shows matching entities or indicates novel node -->
+                    </div>
+                  </div>
+
+                  <!-- Section 4: Interactive Attribute Edit Form -->
+                  <div class="inspector-section">
+                    <div class="inspector-section-label">04 / ATTRIBUTE VERIFICATION &amp; CORRECTION</div>
+                    <div class="inspector-edit-form" id="inspEditForm">
+                      <!-- Dynamic form fields based on finding type (Entity, Relationship, Location, Duplicate, Event) -->
+                    </div>
+                  </div>
+
+                  <!-- Section 5: Adjudication Decision Controls -->
+                  <div class="inspector-section inspector-decision-box">
+                    <div class="inspector-section-label">05 / INVESTIGATOR ADJUDICATION</div>
+                    <div class="decision-buttons-row">
+                      <button type="button" class="review-btn review-btn-accept-lg" id="inspAcceptBtn">
+                        ✓ ACCEPT &amp; COMMIT TO GRAPH
+                      </button>
+                      <button type="button" class="review-btn review-btn-edit-lg" id="inspEditBtn">
+                        ✎ SAVE EDITS &amp; VERIFY
+                      </button>
+                      <button type="button" class="review-btn review-btn-reject-lg" id="inspRejectBtn">
+                        ✕ REJECT FINDING
+                      </button>
+                    </div>
+                    <p class="decision-note">Verified findings are permanently registered into graph topology, GIS spatial layers, and evidence chain of custody.</p>
+                  </div>
+
+                  <!-- Section 6: Previous Audit Log for this item -->
+                  <div class="inspector-section" id="inspAuditHistorySection" style="display: none;">
+                    <div class="inspector-section-label">06 / ITEM AUDIT RECORD</div>
+                    <div class="inspector-item-audit" id="inspItemAuditList">
+                      <!-- Populated when item has previous reviews -->
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="workspace-footer">
+            <span><i></i> CIPHER WORKSPACE / HUMAN VERIFICATION LAYER</span>
+            <span id="reviewFooterStatus">ALL GRAPH COMMITS MANDATE INVESTIGATOR SIGN-OFF</span>
+          </div>
+        </section>
+
+        <!-- REJECTION REASON MODAL -->
+        <div class="cipher-modal-backdrop" id="reviewRejectModal" style="display: none;" aria-hidden="true">
+          <div class="cipher-modal-card">
+            <div class="cipher-modal-head">
+              <h3>Reject Finding from Case Ledger</h3>
+              <button type="button" class="modal-close-btn" id="rejectModalCloseBtn">✕</button>
+            </div>
+            <div class="cipher-modal-body">
+              <p>State mandatory investigative rationale for rejecting finding <b id="rejectModalItemTitle">—</b>.</p>
+              <div class="form-group">
+                <label for="rejectReasonSelect">Primary Reason:</label>
+                <select id="rejectReasonSelect" class="review-select">
+                  <option value="Incorrect entity extraction">Incorrect entity extraction</option>
+                  <option value="Incorrect relationship type / direction">Incorrect relationship type / direction</option>
+                  <option value="Duplicate of existing entity">Duplicate of existing entity</option>
+                  <option value="Unsupported by source evidence">Unsupported by source evidence</option>
+                  <option value="Incorrect geolocation coordinates">Incorrect geolocation coordinates</option>
+                  <option value="False positive / Noise">False positive / Noise</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="rejectNotesInput">Investigator Notes (Optional):</label>
+                <textarea id="rejectNotesInput" rows="3" class="review-textarea" placeholder="Explain why this finding is being rejected..."></textarea>
+              </div>
+            </div>
+            <div class="cipher-modal-foot">
+              <button type="button" class="review-btn secondary" id="rejectModalCancelBtn">CANCEL</button>
+              <button type="button" class="review-btn review-btn-reject-confirm" id="rejectModalConfirmBtn">CONFIRM REJECTION</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- AUDIT TRAIL LOG MODAL -->
+        <div class="cipher-modal-backdrop" id="reviewAuditModal" style="display: none;" aria-hidden="true">
+          <div class="cipher-modal-card audit-modal-card">
+            <div class="cipher-modal-head">
+              <div>
+                <h3>Verification &amp; Adjudication Audit Trail</h3>
+                <p class="modal-subtitle">Immutable ledger of officer decisions, attribute edits, and finding sign-offs</p>
+              </div>
+              <button type="button" class="modal-close-btn" id="auditModalCloseBtn">✕</button>
+            </div>
+            <div class="cipher-modal-body audit-modal-body">
+              <div class="audit-table-wrapper">
+                <table class="audit-trail-table">
+                  <thead>
+                    <tr>
+                      <th>TIMESTAMP</th>
+                      <th>ACTION</th>
+                      <th>FINDING</th>
+                      <th>TYPE</th>
+                      <th>REVIEWER</th>
+                      <th>RATIONALE / EDITS</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reviewAuditTableBody">
+                    <!-- Populated dynamically from review_actions -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="cipher-modal-foot">
+              <button type="button" class="review-btn secondary" id="auditModalDoneBtn">CLOSE AUDIT LOG</button>
+            </div>
+          </div>
+        </div>
       </main>
     </div>
   </section>
